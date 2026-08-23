@@ -457,6 +457,100 @@ ENDPOINT optionally overrides `beemacs-endpoint' for this call only."
        "/merge" `(("name" . ,name) ("branch" . ,branch)) endpoint)
     (beemacs-http-error (beemacs-api--handle-form-http-error err "/merge"))))
 
+;;; Fleet management: add a submodule, link two submodules, change a
+;;; tracked remote
+
+(defun beemacs-api-submodule-add (url &optional name branch endpoint)
+  "Register a new submodule tracking URL via `POST /submodule/add'.
+
+Mirrors beehived's `submoduleAdd' handler (`internal/web/web.go'): the
+swarm-fleet-management form-POST route that clones URL as a new tracked
+submodule, optionally named NAME (derived from URL when omitted; must be
+a single safe path segment, no `/'/`\\', not `.'/`..') and optionally
+following tracked BRANCH, then commits/publishes the registration.
+
+This is a plain HTML/htmx form-POST route (see `docs/api-contract.md''s
+HTML-vs-JSON split), not one of the `*.json'/`/api/editor/*' JSON
+surfaces -- so, like `beemacs-api-merge', the SUCCESS return value is
+whatever raw response body text beehived returns (a 303 redirect to `/'
+is followed transparently by `url-retrieve-synchronously', so the body
+is typically the re-rendered dashboard HTML), not parsed JSON; callers
+must not scrape it as structured data, only confirm a 2xx was actually
+received.
+
+Returns the raw response body string on success (2xx). On failure --
+missing URL (`ErrURLRequired'), an invalid NAME (`ErrInvalidName'), a
+NAME already in use (`ErrExists', HTTP 409), or any other git/publish
+failure -- signals `beemacs-api-error' carrying the server's TRUE
+plain-text result via `beemacs-api--handle-form-http-error', never an
+assumed success or a synthesized generic failure. ENDPOINT optionally
+overrides `beemacs-endpoint' for this call only."
+  (condition-case err
+      (beemacs-transport-post-form
+       "/submodule/add"
+       `(("url" . ,url)
+         ,@(when (and name (not (string-empty-p name))) `(("name" . ,name)))
+         ,@(when (and branch (not (string-empty-p branch))) `(("branch" . ,branch))))
+       endpoint)
+    (beemacs-http-error (beemacs-api--handle-form-http-error err "/submodule/add"))))
+
+(defun beemacs-api-submodule-link (from to &optional endpoint)
+  "Register a dependency edge FROM -> TO via `POST /submodule/link'.
+
+Mirrors beehived's `submoduleLink' handler (`internal/web/web.go'): the
+swarm-fleet-management form-POST route that records, in
+`SUBMODULE-LINKS.yaml', that submodule FROM may depend on (reference
+tasks owned by) submodule TO, cycle-checked before it is written.
+
+This is a plain HTML/htmx form-POST route (see `docs/api-contract.md''s
+HTML-vs-JSON split), not one of the `*.json'/`/api/editor/*' JSON
+surfaces -- so, like `beemacs-api-merge', the SUCCESS return value is
+the raw response body text beehived returns, not parsed JSON; callers
+must not scrape it as structured data, only confirm a 2xx was actually
+received.
+
+Returns the raw response body string on success (2xx). On failure --
+an empty FROM/TO (`ErrInvalidDep'), a link that would form a wait-cycle
+or self-dependency (`ErrCycle', HTTP 409), or any other failure --
+signals `beemacs-api-error' carrying the server's TRUE plain-text result
+via `beemacs-api--handle-form-http-error', never an assumed success or a
+synthesized generic failure. ENDPOINT optionally overrides
+`beemacs-endpoint' for this call only."
+  (condition-case err
+      (beemacs-transport-post-form
+       "/submodule/link" `(("from" . ,from) ("to" . ,to)) endpoint)
+    (beemacs-http-error (beemacs-api--handle-form-http-error err "/submodule/link"))))
+
+(defun beemacs-api-submodule-set-remote (name url &optional endpoint)
+  "Change tracked submodule NAME's remote to URL via
+`POST /submodule/{name}/remote'.
+
+Mirrors beehived's `submoduleRemote' handler (`internal/web/web.go'):
+the swarm-fleet-management form-POST route that rewrites
+`.gitmodules''s `submodule.<path>.url' to URL and syncs the checkout's
+`origin' remote (`submod.SetRemoteURL', `git submodule sync'
+underneath).
+
+This is a plain HTML/htmx form-POST route (see `docs/api-contract.md''s
+HTML-vs-JSON split), not one of the `*.json'/`/api/editor/*' JSON
+surfaces -- so, like `beemacs-api-merge', the SUCCESS return value is
+the raw response body text beehived returns (a 303 redirect to
+`/roi/{name}' is followed transparently, so the body is typically the
+re-rendered ROI editor HTML for NAME), not parsed JSON; callers must not
+scrape it as structured data, only confirm a 2xx was actually received.
+
+Returns the raw response body string on success (2xx). On failure --
+a missing URL (`ErrURLRequired'), an invalid NAME (`ErrInvalidName'), an
+unknown submodule checkout (`ErrNotExist', HTTP 404), or any other
+failure -- signals `beemacs-api-error' carrying the server's TRUE
+plain-text result via `beemacs-api--handle-form-http-error', never an
+assumed success or a synthesized generic failure. ENDPOINT optionally
+overrides `beemacs-endpoint' for this call only."
+  (let ((path (format "/submodule/%s/remote" name)))
+    (condition-case err
+        (beemacs-transport-post-form path `(("url" . ,url)) endpoint)
+      (beemacs-http-error (beemacs-api--handle-form-http-error err path)))))
+
 (defun beemacs-api-human ()
   "Return the hive-wide NEEDS-HUMAN task listing across every tracked submodule.
 

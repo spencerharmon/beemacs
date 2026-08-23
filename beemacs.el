@@ -957,6 +957,90 @@ wrong\". See `beemacs-api-merge' for the full request/error contract."
     (beemacs-api-error
      (message "beemacs-merge FAILED: %s" (car (cdr err))))))
 
+;;; Fleet management (add a submodule, link two submodules, change a
+;;; tracked remote)
+
+;;;###autoload
+(defun beemacs-submodule-add (url &optional name branch)
+  "Register a new submodule tracking URL: `POST /submodule/add'.
+
+URL, NAME (optional -- derived from URL when blank), and BRANCH
+(optional) are read interactively. Mirrors the beehived web UI's
+add-submodule form. This NEVER reports an assumed-success message: on a
+2xx response it echoes that the registration was actually accepted by
+the server (only reachable once `beemacs-api-submodule-add' has
+returned without signaling); on any failure it signals/echoes the
+server's TRUE error text, never a generic \"something went wrong\". See
+`beemacs-api-submodule-add' for the full request/error contract."
+  (interactive
+   (list (read-string "Submodule URL: ")
+         (let ((n (read-string "Name (blank to derive from URL): ")))
+           (unless (string-empty-p n) n))
+         (let ((b (read-string "Tracked branch (blank for default): ")))
+           (unless (string-empty-p b) b))))
+  (condition-case err
+      (progn
+        (beemacs-api-submodule-add url name branch)
+        (message "beemacs-submodule-add: %s registered (accepted by beehived)"
+                 (or name url)))
+    (beemacs-api-error
+     (message "beemacs-submodule-add FAILED: %s" (car (cdr err))))))
+
+;;;###autoload
+(defun beemacs-submodule-link (from to)
+  "Register dependency edge FROM -> TO: `POST /submodule/link'.
+
+FROM and TO are read interactively from the live submodule list.
+Mirrors the beehived web UI's link-submodules form. This NEVER reports
+an assumed-success message: on a 2xx response it echoes that the link
+was actually accepted by the server (only reachable once
+`beemacs-api-submodule-link' has returned without signaling); on any
+failure -- an invalid FROM/TO, a wait-cycle (`ErrCycle'), or any other
+backend error -- it signals/echoes the server's TRUE error text, never a
+generic \"something went wrong\". See `beemacs-api-submodule-link' for
+the full request/error contract."
+  (interactive
+   (let ((names (mapcar (lambda (s) (or (alist-get 'name s) (alist-get 'Name s)))
+                         (append (beemacs-api-submodules) nil))))
+     (list (completing-read "From submodule: " names)
+           (completing-read "To submodule (dependency): " names))))
+  (condition-case err
+      (progn
+        (beemacs-api-submodule-link from to)
+        (message "beemacs-submodule-link: %s -> %s registered (accepted by beehived)"
+                 from to))
+    (beemacs-api-error
+     (message "beemacs-submodule-link FAILED: %s" (car (cdr err))))))
+
+;;;###autoload
+(defun beemacs-submodule-set-remote (name url)
+  "Change tracked submodule NAME's remote to URL:
+`POST /submodule/{name}/remote'.
+
+NAME is read interactively from the live submodule list; URL is read
+interactively. Mirrors the beehived web UI's ROI editor's remote-change
+action. This NEVER reports an assumed-success message: on a 2xx response
+it echoes that the remote change was actually accepted by the server
+(only reachable once `beemacs-api-submodule-set-remote' has returned
+without signaling); on any failure -- a missing URL, an unknown
+submodule (`ErrNotExist'), or any other backend error -- it
+signals/echoes the server's TRUE error text, never a generic \"something
+went wrong\". See `beemacs-api-submodule-set-remote' for the full
+request/error contract."
+  (interactive
+   (list (completing-read
+          "Submodule name: "
+          (mapcar (lambda (s) (or (alist-get 'name s) (alist-get 'Name s)))
+                   (append (beemacs-api-submodules) nil)))
+         (read-string "New remote URL: ")))
+  (condition-case err
+      (progn
+        (beemacs-api-submodule-set-remote name url)
+        (message "beemacs-submodule-set-remote: %s remote set (accepted by beehived)"
+                 name))
+    (beemacs-api-error
+     (message "beemacs-submodule-set-remote FAILED: %s" (car (cdr err))))))
+
 (provide 'beemacs)
 
 ;;; beemacs.el ends here

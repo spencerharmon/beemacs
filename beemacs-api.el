@@ -271,6 +271,67 @@ endpoint -- unlike the submodule-scoped `beemacs-api-docs'/
 `beemacs-api-branches'/`beemacs-api-commit', it takes no submodule NAME."
   (beemacs-api-json-request "/skills.json"))
 
+(defun beemacs-api--handle-form-http-error (err path)
+  "Convert a caught `beemacs-http-error' ERR for form-POST PATH into
+`beemacs-api-error', preferring the server's TRUE response body over a
+synthesized \"non-2xx response NNN\" message.
+
+The plain HTML/htmx maintenance routes this backs (`/merge' and friends)
+fail via Go's `http.Error', which writes a PLAIN-TEXT body (\"merge
+conflict\", a wrapped git error, ...), not the `writeJSON'
+`{\"error\":...}' convention `beemacs-api--handle-http-error' expects. So
+this first tries the JSON convention (some of these routes may still use
+it), then falls back to the raw response body text (trimmed) when it is
+non-empty plain text, and only falls back further to the generic
+transport message when the body itself is empty -- ensuring the caller
+always surfaces the actual backend result, never an assumed failure
+reason."
+  (let* ((data (cdr err))
+         (response (nth 1 data))
+         (response-body (and (listp response) (nth 2 response)))
+         (detail (or (beemacs-api--error-detail response-body)
+                     (and (stringp response-body)
+                          (not (string-empty-p (string-trim response-body)))
+                          (string-trim response-body)))))
+    (signal 'beemacs-api-error
+             (list (if detail
+                       (format "%s (%s)" detail path)
+                     (format "%s" (car data)))))))
+
+(defun beemacs-api-merge (name branch &optional endpoint)
+  "Merge BRANCH into submodule NAME's tracked branch via `POST /merge'.
+
+Mirrors beehived's `mergePost' handler (`internal/web/web.go'): the
+swarm-maintenance form-POST route that runs the real `git merge' against
+the submodule's checkout, commits the hive-side PLAN.md on success, and
+re-renders the merge panel -- or fails loudly with the true backend
+result (plain-text \"merge conflict\" on a real git conflict, HTTP 409;
+any other git failure, HTTP 500 with the git error text). Companion
+`GET /merge' (`mergeGet') renders the same panel read-only and is
+reachable via `beemacs-transport-get' directly since it takes no
+parameters.
+
+This is a plain HTML/htmx route (see `docs/api-contract.md''s
+HTML-vs-JSON split), not one of the `*.json'/`/api/editor/*' JSON
+surfaces -- so, unlike every other `beemacs-api-*' function in this
+file, the SUCCESS return value is the raw HTML response body text (the
+re-rendered merge panel fragment), not parsed JSON. Callers must not
+scrape it as structured data (per the contract's non-goals); it exists
+so a caller can confirm/display that a 2xx response was actually
+received, never merely assume one.
+
+Returns the raw response body string on success (2xx). On failure,
+signals `beemacs-api-error' carrying the server's TRUE result text (the
+plain-text git/merge error, extracted via
+`beemacs-api--handle-form-http-error') -- this command never reports an
+assumed-success or assumed-failure message; every outcome, success or
+error, reflects what beehived's `mergePost' actually returned.
+ENDPOINT optionally overrides `beemacs-endpoint' for this call only."
+  (condition-case err
+      (beemacs-transport-post-form
+       "/merge" `(("name" . ,name) ("branch" . ,branch)) endpoint)
+    (beemacs-http-error (beemacs-api--handle-form-http-error err "/merge"))))
+
 (defun beemacs-api-plan (name &optional endpoint)
   "Return the parsed plan payload for submodule NAME.
 

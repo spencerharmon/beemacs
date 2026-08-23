@@ -134,6 +134,38 @@ ENDPOINT optionally overrides `beemacs-endpoint' for this call only.
 Signals `beemacs-http-error' on a non-2xx status or connection failure."
   (beemacs-transport-request path endpoint))
 
+(defun beemacs-transport--form-encode (fields)
+  "Encode FIELDS, an alist of (KEY . VALUE) strings, as `application/
+x-www-form-urlencoded' body text, the same encoding Go's
+`http.Request.FormValue' decodes on the server side."
+  (mapconcat (lambda (kv)
+               (format "%s=%s"
+                       (url-hexify-string (format "%s" (car kv)))
+                       (url-hexify-string (format "%s" (cdr kv)))))
+             fields "&"))
+
+(defun beemacs-transport-post-form (path fields &optional endpoint)
+  "POST FIELDS (an alist of form-field name/value strings) to PATH.
+
+Sets the request method to POST, a `Content-Type:
+application/x-www-form-urlencoded' header, and a URL-encoded body built
+from FIELDS -- the counterpart to `beemacs-transport-post' for
+beehived's plain HTML/htmx form-POST routes (`POST /merge',
+`POST /roi/{name}', `POST /secrets', ...) that read their input via Go's
+`r.FormValue', not a JSON body. Returns the response body string on
+success (a rendered HTML fragment for these routes, not JSON).
+ENDPOINT optionally overrides `beemacs-endpoint' for this call only.
+Signals `beemacs-http-error' on a non-2xx status or connection failure,
+carrying the full `(status headers body)' response data so a caller can
+recover the server's true (often plain-text, `http.Error'-produced)
+failure message -- never assume success or synthesize a status."
+  (let ((url-request-method "POST")
+        (url-request-extra-headers
+         '(("Content-Type" . "application/x-www-form-urlencoded")))
+        (url-request-data
+         (encode-coding-string (beemacs-transport--form-encode fields) 'utf-8)))
+    (beemacs-transport-request path endpoint)))
+
 (defun beemacs-transport-post (path json-string &optional endpoint)
   "POST JSON-STRING to beehived PATH, returning the response body string.
 

@@ -19,6 +19,7 @@
 (require 'beemacs-pi)
 (require 'beemacs-pi-chat)
 (require 'beemacs-pi-sessions)
+(require 'beemacs-pi-model)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -887,6 +888,117 @@ teardown via `beemacs-pi-stop' can be observed like the real process."
         (when (buffer-live-p buf) (kill-buffer buf))
         (when (get-buffer "*beemacs-pi-sessions-test-branch*")
           (kill-buffer "*beemacs-pi-sessions-test-branch*"))))))
+
+;;; beemacs-pi-model tests
+
+(defun beemacs-test--make-fake-pi-model-list (providers-json)
+  "Write a stub `pi' RPC binary replying `model_list' with PROVIDERS-JSON.
+
+PROVIDERS-JSON is an already JSON-encoded array string. The stub ignores
+its stdin request line, replies once, and then blocks (`cat's stdin) so
+teardown via `beemacs-pi-stop' can be observed like the real process."
+  (beemacs-test--make-fake-pi-rpc
+   (concat "read _line\n"
+           (format "printf '%%s\\n' %s\n"
+                   (shell-quote-argument
+                    (json-encode `((type . "model_list")
+                                   (providers . ,providers-json)))))
+           "cat >/dev/null\n")))
+
+(ert-deftest beemacs-test-pi-model-list-returns-records ()
+  "`beemacs-pi-model-list' round-trips a `list_models'/`model_list' exchange."
+  (let* ((providers (vector '((provider . "anthropic") (models . ["claude-opus-4" "claude-sonnet-4"]))
+                             '((provider . "openai") (models . ["gpt-5"]))))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-model-list providers))
+         (records (beemacs-pi-model-list)))
+    (should (= (length records) 2))
+    (should (equal (beemacs-pi-model--provider-name (nth 0 records)) "anthropic"))
+    (should (equal (beemacs-pi-model--provider-models (nth 0 records))
+                   '("claude-opus-4" "claude-sonnet-4")))
+    (should (equal (beemacs-pi-model--provider-name (nth 1 records)) "openai"))
+    (should (equal (beemacs-pi-model--provider-models (nth 1 records)) '("gpt-5")))))
+
+(ert-deftest beemacs-test-pi-model-list-signals-on-timeout ()
+  "`beemacs-pi-model-list' signals `beemacs-pi-model-error' if pi never replies."
+  (let* ((beemacs-pi-model-list-timeout 0.2)
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n")))
+    (should-error (beemacs-pi-model-list) :type 'beemacs-pi-model-error)))
+
+(ert-deftest beemacs-test-pi-model-candidates-flattens-provider-model-pairs ()
+  "`beemacs-pi-model--candidates' flattens providers/models to \"PROVIDER/MODEL\" pairs."
+  (let* ((providers (list '((provider . "anthropic") (models . ("claude-opus-4" "claude-sonnet-4")))
+                          '((provider . "openai") (models . ("gpt-5")))))
+         (candidates (beemacs-pi-model--candidates providers)))
+    (should (equal (mapcar #'car candidates)
+                   '("anthropic/claude-opus-4" "anthropic/claude-sonnet-4" "openai/gpt-5")))
+    (should (equal (cdr (assoc "openai/gpt-5" candidates)) '("openai" . "gpt-5")))))
+
+(ert-deftest beemacs-test-pi-model-set-and-get-default-persists ()
+  "`beemacs-pi-model-set-default'/`beemacs-pi-model-default' round-trip via the persist file."
+  (let ((beemacs-pi-model-persist-file (make-temp-file "beemacs-pi-model-default-")))
+    (unwind-protect
+        (progn
+          (should-not (beemacs-pi-model-default))
+          (beemacs-pi-model-set-default "anthropic" "claude-sonnet-4")
+          (should (equal (beemacs-pi-model-default) '("anthropic" . "claude-sonnet-4"))))
+      (delete-file beemacs-pi-model-persist-file))))
+
+(ert-deftest beemacs-test-pi-model-current-prefers-session-override ()
+  "`beemacs-pi-model-current' prefers a buffer-local override over the persisted default."
+  (let ((beemacs-pi-model-persist-file (make-temp-file "beemacs-pi-model-default-")))
+    (unwind-protect
+        (with-temp-buffer
+          (beemacs-pi-model-set-default "anthropic" "claude-sonnet-4")
+          (should (equal (beemacs-pi-model-current) '("anthropic" . "claude-sonnet-4")))
+          (setq beemacs-pi-model--session-override '("openai" . "gpt-5"))
+          (should (equal (beemacs-pi-model-current) '("openai" . "gpt-5"))))
+      (delete-file beemacs-pi-model-persist-file))))
+
+(ert-deftest beemacs-test-pi-model-select-persists-default-outside-chat-buffer ()
+  "`beemacs-pi-model-select' persists the choice as the install default by default."
+  (let* ((beemacs-pi-model-persist-file (make-temp-file "beemacs-pi-model-default-"))
+         (providers (vector '((provider . "anthropic") (models . ["claude-opus-4"]))))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-model-list providers)))
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) "anthropic/claude-opus-4")))
+            (beemacs-pi-model-select))
+          (should (equal (beemacs-pi-model-default) '("anthropic" . "claude-opus-4")))
+          (should-not beemacs-pi-model--session-override))
+      (delete-file beemacs-pi-model-persist-file))))
+
+(ert-deftest beemacs-test-pi-model-select-session-only-does-not-persist ()
+  "`beemacs-pi-model-select' with SESSION-ONLY sets a buffer-local override, no persist."
+  (let* ((beemacs-pi-model-persist-file (make-temp-file "beemacs-pi-model-default-"))
+         (providers (vector '((provider . "openai") (models . ["gpt-5"]))))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-model-list providers)))
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) "openai/gpt-5")))
+            (beemacs-pi-model-select t))
+          (should (equal beemacs-pi-model--session-override '("openai" . "gpt-5")))
+          (should-not (beemacs-pi-model-default)))
+      (delete-file beemacs-pi-model-persist-file))))
+
+(ert-deftest beemacs-test-pi-model-select-in-chat-buffer-sets-session-override ()
+  "`beemacs-pi-model-select' invoked in a `beemacs-pi-chat-mode' buffer overrides only that session."
+  (let* ((beemacs-pi-model-persist-file (make-temp-file "beemacs-pi-model-default-"))
+         (providers (vector '((provider . "anthropic") (models . ["claude-sonnet-4"]))))
+         (model-executable (beemacs-test--make-fake-pi-model-list providers))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (buf (beemacs-pi-chat-open "test-model-select")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((beemacs-pi-executable model-executable))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (&rest _) "anthropic/claude-sonnet-4")))
+              (beemacs-pi-model-select)))
+          (should (equal beemacs-pi-model--session-override '("anthropic" . "claude-sonnet-4")))
+          (should-not (beemacs-pi-model-default)))
+      (delete-file beemacs-pi-model-persist-file)
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
 
 (provide 'beemacs-tests)
 

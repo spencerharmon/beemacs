@@ -43,6 +43,7 @@
 (require 'beemacs-pi)
 (require 'beemacs-pi-chat)
 (require 'beemacs-pi-sessions)
+(require 'beemacs-pi-model)
 (require 'tabulated-list)
 (require 'diff-mode)
 

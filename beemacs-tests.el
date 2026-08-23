@@ -130,6 +130,106 @@ jsonapi.go): every JSON handler reports a failure as
                   (vector '((name . "beemacs")) '((name . "beehive"))))
                  '("beemacs" "beehive"))))
 
+(defun beemacs-test--plan-fixture ()
+  "A minimal `beemacs-api-plan'-shaped payload for plan-view tests.
+
+Mirrors GET /submodule/{name}/plan.json's shape (internal/web.Plan/
+PlanItem, JSON-decoded via `beemacs-api--parse-json': alists/vectors,
+booleans as `t'/`:json-false')."
+  '((name . "beemacs")
+    (plan . ((ROIStamp . "abc123")
+             (Items
+              . [((ID . "beemacs-plan-view")
+                  (Status . "TODO")
+                  (Weight . 4)
+                  (Deps . ["beemacs-api-contract" "beehive:beemacs-json-api"])
+                  (Active . t)
+                  (Stale . :json-false)
+                  (Session . "beemacs-1")
+                  (DocHref . "/submodule/beemacs/doc/foo.md")
+                  (SessionHref . ""))
+                 ((ID . "beemacs-transport")
+                  (Status . "DONE")
+                  (Weight . 3)
+                  (Deps . [])
+                  (Active . :json-false)
+                  (Stale . :json-false)
+                  (Session . "")
+                  (DocHref . "")
+                  (SessionHref . "/submodule/beemacs/session/xyz"))
+                 ((ID . "beemacs-idle")
+                  (Status . "TODO")
+                  (Weight . 1)
+                  (Deps . [])
+                  (Active . :json-false)
+                  (Stale . t)
+                  (Session . "stale-owner")
+                  (DocHref . "")
+                  (SessionHref . ""))])))))
+
+(ert-deftest beemacs-test-render-plan-item-claim-active ()
+  "An active claim renders as \"active <session>\"."
+  (let* ((data (beemacs-test--plan-fixture))
+         (item (beemacs-render-plan-find-item data "beemacs-plan-view")))
+    (should (equal (beemacs-render-plan-item-claim item) "active beemacs-1"))))
+
+(ert-deftest beemacs-test-render-plan-item-claim-stale ()
+  "A stale (TTL-expired) claim renders as \"stale <session>\"."
+  (let* ((data (beemacs-test--plan-fixture))
+         (item (beemacs-render-plan-find-item data "beemacs-idle")))
+    (should (equal (beemacs-render-plan-item-claim item) "stale stale-owner"))))
+
+(ert-deftest beemacs-test-render-plan-item-claim-unclaimed ()
+  "An unclaimed task (neither active nor stale) renders as \"\"."
+  (let* ((data (beemacs-test--plan-fixture))
+         (item (beemacs-render-plan-find-item data "beemacs-transport")))
+    (should (equal (beemacs-render-plan-item-claim item) ""))))
+
+(ert-deftest beemacs-test-render-plan-item-deps ()
+  "Deps render as a comma-joined string, empty string when there are none."
+  (let* ((data (beemacs-test--plan-fixture)))
+    (should (equal (beemacs-render-plan-item-deps
+                    (beemacs-render-plan-find-item data "beemacs-plan-view"))
+                   "beemacs-api-contract,beehive:beemacs-json-api"))
+    (should (equal (beemacs-render-plan-item-deps
+                    (beemacs-render-plan-find-item data "beemacs-transport"))
+                   ""))))
+
+(ert-deftest beemacs-test-render-plan-rows ()
+  "`beemacs-render-plan-rows' shapes each item into a tabulated-list entry."
+  (let* ((data (beemacs-test--plan-fixture))
+         (rows (beemacs-render-plan-rows data)))
+    (should (equal (length rows) 3))
+    (should (equal (car (nth 0 rows)) "beemacs-plan-view"))
+    (should (equal (cadr (nth 0 rows))
+                    ["beemacs-plan-view" "TODO" "4"
+                     "beemacs-api-contract,beehive:beemacs-json-api"
+                     "active beemacs-1"]))
+    (should (equal (cadr (nth 1 rows))
+                    ["beemacs-transport" "DONE" "3" "" ""]))))
+
+(ert-deftest beemacs-test-render-plan-find-item ()
+  "`beemacs-render-plan-find-item' resolves an id to its full task alist,
+or nil for an id absent from the plan."
+  (let ((data (beemacs-test--plan-fixture)))
+    (should (equal (alist-get 'Status (beemacs-render-plan-find-item
+                                        data "beemacs-transport"))
+                    "DONE"))
+    (should (null (beemacs-render-plan-find-item data "no-such-task")))))
+
+(ert-deftest beemacs-test-api-plan-builds-plan-json-path ()
+  "`beemacs-api-plan' requests /submodule/{name}/plan.json and parses it."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-url url)
+                 (list 200 nil
+                       "{\"name\":\"beemacs\",\"plan\":{\"ROIStamp\":\"abc\",\"Items\":[]}}"))))
+      (let ((result (beemacs-api-plan "beemacs")))
+        (should (string-suffix-p "/submodule/beemacs/plan.json" seen-url))
+        (should (equal (alist-get 'name result) "beemacs"))
+        (should (equal (alist-get 'ROIStamp (alist-get 'plan result)) "abc"))))))
+
 (provide 'beemacs-tests)
 
 ;;; beemacs-tests.el ends here

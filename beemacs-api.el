@@ -94,6 +94,21 @@ numbers per `beemacs-api--parse-json')."
                           (format "%s (%s)" detail path)
                         (format "%s" (car data)))))))))
 
+(defun beemacs-api-plan (name &optional endpoint)
+  "Return the parsed plan payload for submodule NAME.
+
+Mirrors GET /submodule/{name}/plan.json (beehived's `planJSON' handler,
+internal/web/jsonapi.go): an alist with a `name' key and a `plan' key
+whose value carries `ROIStamp' and the `Items' vector of task alists
+(ID/Status/Weight/Deps/claim state/DocHref/SessionHref, per
+internal/web.PlanItem -- these structs carry no json tags, so keys
+serialize verbatim as the Go field names). `beemacs-render-plan-rows'
+projects this payload into `tabulated-list-entries'.
+
+ENDPOINT optionally overrides `beemacs-endpoint' for this call only.
+Signals `beemacs-api-error' on any transport or JSON failure."
+  (beemacs-api-json-request (format "/submodule/%s/plan.json" name) endpoint))
+
 (provide 'beemacs-api)
 
 ;;; beemacs-api.el ends here

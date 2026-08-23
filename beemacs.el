@@ -46,6 +46,7 @@
 (require 'beemacs-pi-chat)
 (require 'beemacs-pi-sessions)
 (require 'beemacs-pi-model)
+(require 'beemacs-session)
 (require 'tabulated-list)
 (require 'diff-mode)
 
@@ -522,14 +523,24 @@ state, `RET' opening the task's linked change doc + live session."
   "Drill into the submodule's session list.
 
 The `beehive:beemacs-json-api' contract has not yet added a
-`sessions.json' endpoint (only `GET /submodule/{name}/sessions' HTML), so
-this drill-in cannot render structured data from JSON today; it reports
-that gap rather than scraping HTML or faking a result."
+`sessions.json' endpoint (only `GET /submodule/{name}/sessions' HTML) to
+enumerate session branches, so this cannot yet list them structurally; it
+prompts for a branch name directly and opens it with
+`beemacs-session-view' (`beemacs-session.el'), which streams that session's
+transcript live via the existing SSE endpoint (`GET
+/submodule/{name}/session/{branch}/stream') and renders a recorded session's
+full transcript the same way. Listing branches without a manual name still
+awaits a `sessions.json' endpoint — visit `/submodule/NAME/sessions' in a
+browser to find one meanwhile."
   (interactive)
   (unless (derived-mode-p 'beemacs-submodule-view-mode)
     (user-error "Not in a beemacs-submodule-view-mode buffer"))
-  (message "Sessions drill-in pending a sessions.json endpoint (see beemacs-session-stream); visit /submodule/%s/sessions in a browser meanwhile"
-           beemacs-submodule-view--name))
+  (let ((branch (read-string
+                 (format "Session branch for %s: " beemacs-submodule-view--name))))
+    (if (string-empty-p branch)
+        (message "Sessions drill-in: enumerating branches still pending a sessions.json endpoint (see beemacs-session-stream); visit /submodule/%s/sessions in a browser meanwhile"
+                 beemacs-submodule-view--name)
+      (beemacs-session-view beemacs-submodule-view--name branch))))
 
 (defun beemacs-submodule-view-env ()
   "Drill into the submodule's deploy-env view.

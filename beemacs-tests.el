@@ -22,6 +22,7 @@
 (require 'beemacs-pi-sessions)
 (require 'beemacs-pi-model)
 (require 'beemacs-streaming)
+(require 'beemacs-session)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -574,7 +575,8 @@ jsonapi.go): every JSON handler reports a failure as
         (when (get-buffer b) (kill-buffer b))))))
 
 (ert-deftest beemacs-test-submodule-view-sessions-reports-pending-gap ()
-  "The sessions drill-in reports the pending JSON-API gap via `message'."
+  "The sessions drill-in reports the pending sessions.json listing gap via
+`message' when the user gives no branch name (an empty `read-string')."
   (cl-letf (((symbol-function 'beemacs-transport--call)
              (beemacs-test--mock-call
               200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
@@ -583,9 +585,30 @@ jsonapi.go): every JSON handler reports a failure as
         (with-current-buffer "*beemacs-submodule: beemacs*"
           (let (msg)
             (cl-letf (((symbol-function 'message)
-                       (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+                       (lambda (fmt &rest args) (setq msg (apply #'format fmt args))))
+                      ((symbol-function 'read-string) (lambda (&rest _) "")))
               (beemacs-submodule-view-sessions))
             (should (string-match-p "sessions.json" msg))))
+      (when (get-buffer "*beemacs-submodule: beemacs*")
+        (kill-buffer "*beemacs-submodule: beemacs*")))))
+
+(ert-deftest beemacs-test-submodule-view-sessions-opens-branch-when-given ()
+  "The sessions drill-in opens `beemacs-session-view' when the user supplies
+a branch name."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
+    (beemacs-submodule-view "beemacs")
+    (unwind-protect
+        (with-current-buffer "*beemacs-submodule: beemacs*"
+          (let (opened-name opened-branch)
+            (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "bee-foo"))
+                      ((symbol-function 'beemacs-session-view)
+                       (lambda (name branch)
+                         (setq opened-name name opened-branch branch))))
+              (beemacs-submodule-view-sessions))
+            (should (equal opened-name "beemacs"))
+            (should (equal opened-branch "bee-foo"))))
       (when (get-buffer "*beemacs-submodule: beemacs*")
         (kill-buffer "*beemacs-submodule: beemacs*")))))
 
@@ -1392,6 +1415,119 @@ server's real response body."
   (cl-letf (((symbol-function 'beemacs-transport--call)
              (beemacs-test--mock-call 404 "404 page not found")))
     (should-error (beemacs-instruction-update) :type 'beemacs-http-error)))
+
+;; --- beemacs-session (live session-transcript buffer) tests ---
+
+(defconst beemacs-test--session-pane-html-1
+  "<div id=\"session-pane\"><div id=\"session-transcript\"><section>turn one</section></div></div>"
+  "First transcript-pane frame used by the session-view tests below.")
+
+(defconst beemacs-test--session-pane-html-2
+  "<div id=\"session-pane\"><div id=\"session-transcript\"><section>turn one</section><section>turn two</section></div></div>"
+  "Second (grown) transcript-pane frame used by the session-view tests below.")
+
+(defun beemacs-test--session-view-open (name branch)
+  "Open a `beemacs-session-view' buffer for NAME/BRANCH with `url-retrieve'
+and `beemacs-sse-connect' mocked out, returning (BUFFER . FILTER) where
+FILTER is the process filter installed on the connection -- tests feed it
+raw SSE bytes directly to simulate server frames, exactly like
+`beemacs-test-sse-connect-installs-filter-and-abort-cleans-up' does for the
+lower-level primitive."
+  (let* ((fake-buffer (generate-new-buffer " *beemacs-session-test*"))
+         (fake-proc (make-pipe-process :name "beemacs-session-test"
+                                        :buffer fake-buffer
+                                        :noquery t
+                                        :filter #'ignore)))
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url _callback &rest _) fake-buffer)))
+      (let ((buf (beemacs-session-view name branch)))
+        (cons buf (process-filter (beemacs-sse-connection-proc
+                                    (with-current-buffer buf
+                                      beemacs-session-view--conn))))))))
+
+(ert-deftest beemacs-test-session-view-opens-and-renders-first-frame ()
+  "`beemacs-session-view' opens a buffer named for NAME/BRANCH and renders
+the first transcript-pane HTML frame as readable (shr-rendered) text."
+  (let* ((opened (beemacs-test--session-view-open "beemacs" "bee-foo"))
+         (buf (car opened))
+         (filter (cdr opened)))
+    (unwind-protect
+        (progn
+          (should (equal (buffer-name buf) "*beemacs-session: beemacs/bee-foo*"))
+          (funcall filter 'fake-proc
+                   (concat "HTTP/1.1 200 OK\r\n\r\ndata: "
+                           beemacs-test--session-pane-html-1 "\n\n"))
+          (with-current-buffer buf
+            (should (string-match-p "turn one" (buffer-string)))
+            (should-not (string-match-p "<div" (buffer-string)))))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-session-view-auto-scrolls-when-point-at-end ()
+  "When point sits at the end of the buffer, a new (grown) transcript frame
+leaves point at the new end too -- the auto-scroll case."
+  (let* ((opened (beemacs-test--session-view-open "beemacs" "bee-foo"))
+         (buf (car opened))
+         (filter (cdr opened)))
+    (unwind-protect
+        (progn
+          (funcall filter 'fake-proc
+                   (concat "HTTP/1.1 200 OK\r\n\r\ndata: "
+                           beemacs-test--session-pane-html-1 "\n\n"))
+          (with-current-buffer buf (goto-char (point-max)))
+          (funcall filter 'fake-proc
+                   (concat "data: " beemacs-test--session-pane-html-2 "\n\n"))
+          (with-current-buffer buf
+            (should (string-match-p "turn two" (buffer-string)))
+            (should (= (point) (point-max)))))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-session-view-preserves-position-when-point-moved-back ()
+  "When the user has moved point back off the end, a new transcript frame
+does not yank point back to the bottom -- it keeps the same distance from
+the (new) end that point had from the (old) end."
+  (let* ((opened (beemacs-test--session-view-open "beemacs" "bee-foo"))
+         (buf (car opened))
+         (filter (cdr opened)))
+    (unwind-protect
+        (progn
+          (funcall filter 'fake-proc
+                   (concat "HTTP/1.1 200 OK\r\n\r\ndata: "
+                           beemacs-test--session-pane-html-1 "\n\n"))
+          (with-current-buffer buf (goto-char (point-min)))
+          (funcall filter 'fake-proc
+                   (concat "data: " beemacs-test--session-pane-html-2 "\n\n"))
+          (with-current-buffer buf
+            (should (string-match-p "turn two" (buffer-string)))
+            (should (= (point) (point-min)))))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-session-view-end-frame-aborts-connection ()
+  "The server's \"end\" frame (an always-empty `data:' payload) aborts the
+SSE connection and clears the buffer-local handle, leaking no process."
+  (let* ((opened (beemacs-test--session-view-open "beemacs" "bee-foo"))
+         (buf (car opened))
+         (filter (cdr opened)))
+    (unwind-protect
+        (progn
+          (funcall filter 'fake-proc
+                   (concat "HTTP/1.1 200 OK\r\n\r\ndata: "
+                           beemacs-test--session-pane-html-1 "\n\n"))
+          (with-current-buffer buf
+            (should beemacs-session-view--conn))
+          (funcall filter 'fake-proc "event: end\ndata: \n\n")
+          (with-current-buffer buf
+            (should-not beemacs-session-view--conn)))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-session-view-kill-buffer-aborts-sse ()
+  "Killing a `beemacs-session-view-mode' buffer aborts its SSE connection
+(the underlying process is no longer live), never leaking it."
+  (let* ((opened (beemacs-test--session-view-open "beemacs" "bee-foo"))
+         (buf (car opened))
+         (proc (with-current-buffer (car opened)
+                 (beemacs-sse-connection-proc beemacs-session-view--conn))))
+    (let (kill-buffer-query-functions) (kill-buffer buf))
+    (should-not (process-live-p proc))))
 
 (provide 'beemacs-tests)
 

@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'json)
+(require 'cl-lib)
 (require 'beemacs-transport)
 
 (defgroup beemacs-api nil
@@ -186,6 +187,75 @@ returned alist carries `name', `sha', `author', `date', `subject',
 `plan_before', and `plan_after' -- all lower-case, since `commitJSON'
 builds its own response map rather than marshaling a struct."
   (beemacs-api-json-request (format "/submodule/%s/commit.json/%s" name sha)))
+
+(defun beemacs-api-dashboard ()
+  "Return the hive-wide swarm dashboard: per-submodule cards plus widgets.
+
+Mirrors `GET /dashboard.json' (beehived's `dashboardJSON'), the same data
+the HTML dashboard renders. The returned alist carries top-level keys
+`subs' (a vector of per-submodule `subView' alists with keys `Name',
+`State', `Stamp', `Pending', `Human', `Env', `Working', `Bees' -- `subView'
+has no json tags, so decoded keys are the exact capitalized Go field
+names), `hygiene', `bootstrap', `root_files', `root_files_drift',
+`skills_drift', and `instruction_drift'. Hive-wide -- takes no submodule
+NAME, unlike `beemacs-api-plan'/`beemacs-api-roi' below."
+  (beemacs-api-json-request "/dashboard.json"))
+
+(defun beemacs-api-dashboard-submodule (name)
+  "Return NAME's `subView' alist from `beemacs-api-dashboard', or nil.
+
+A thin convenience filter over the hive-wide dashboard payload so callers
+needing just one submodule's summary card (state/stamp/pending/human/env/
+working/bees) don't re-implement the `subs' vector scan themselves."
+  (let ((subs (append (alist-get 'subs (beemacs-api-dashboard)) nil)))
+    (cl-find-if (lambda (s) (equal (alist-get 'Name s) name)) subs)))
+
+(defun beemacs-api-plan (name)
+  "Return submodule NAME's live task list.
+
+Mirrors `GET /submodule/{name}/plan.json' (beehived's `planJSON', wrapping
+`planViewData' -- the same claim/running state and doc links the plan
+page and the runner's own selection use). The returned alist carries
+`name' and `plan' (an alist with keys `ROIStamp' and `Items', each item
+carrying the capitalized `PlanItem' struct fields -- `ID', `Status',
+`Desc', `Body', `Deps', `DepStates', `Weight', `Session', `Heartbeat',
+`NotBefore', `Active', `Stale', `Doc', `DocHref', `HumanReason',
+`Category', `Running', `SessionHref' -- no json tags, so decoded keys are
+the exact capitalized Go field names)."
+  (beemacs-api-json-request (format "/submodule/%s/plan.json" name)))
+
+(defun beemacs-api-roi (name)
+  "Return submodule NAME's raw ROI.md content and tracked remote url.
+
+Mirrors `GET /submodule/{name}/roi.json' (beehived's `roiJSON'). The
+returned alist carries `name', `body' (the raw ROI.md text), and
+`remote_url' -- all lower-case, since `roiJSON' builds its own response
+map rather than marshaling a struct."
+  (beemacs-api-json-request (format "/submodule/%s/roi.json" name)))
+
+(defun beemacs-api-secrets ()
+  "Return the hive-wide secrets key-name listing (global plus per-submodule).
+
+Mirrors `GET /secrets.json' (beehived's `secretsJSON'). Like the HTML
+secrets panels, this NEVER returns values, only key names. The returned
+alist carries `global' (a vector of key-name strings for the active
+repo's root SECRETS.yaml.gpg) and `submodules' (a vector of alists with
+keys `name' and `keys', one per tracked submodule) -- all lower-case,
+since `secretsJSON' builds its own response map rather than marshaling a
+struct. Hive-wide -- takes no submodule NAME; use
+`beemacs-api-secrets-for' to filter to one submodule's keys."
+  (beemacs-api-json-request "/secrets.json"))
+
+(defun beemacs-api-secrets-for (name)
+  "Return NAME's `keys' vector from `beemacs-api-secrets', or nil.
+
+A thin convenience filter over the hive-wide secrets payload's
+`submodules' vector, mirroring `beemacs-api-dashboard-submodule''s filter
+pattern over `beemacs-api-dashboard''s `subs' vector."
+  (let* ((data (beemacs-api-secrets))
+         (subs (append (alist-get 'submodules data) nil))
+         (entry (cl-find-if (lambda (s) (equal (alist-get 'name s) name)) subs)))
+    (and entry (alist-get 'keys entry))))
 
 (defun beemacs-api-skills ()
   "Return the hive-wide skills/dances registry, hygiene scan, and cache widget.

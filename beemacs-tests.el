@@ -236,6 +236,195 @@ jsonapi.go): every JSON handler reports a failure as
         (should (string-suffix-p "/skills.json" seen-url))
         (should (equal (alist-get 'dances result) []))))))
 
+(ert-deftest beemacs-test-api-dashboard-path ()
+  "`beemacs-api-dashboard' hits the hive-wide dashboard.json endpoint."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}"))))
+      (let ((result (beemacs-api-dashboard)))
+        (should (string-suffix-p "/dashboard.json" seen-url))
+        (should (equal (length (alist-get 'subs result)) 1))))))
+
+(ert-deftest beemacs-test-api-dashboard-submodule-finds-match ()
+  "`beemacs-api-dashboard-submodule' filters the `subs' vector by Name."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"subs\":[{\"Name\":\"alpha\",\"State\":\"idle\"},"
+                          "{\"Name\":\"beemacs\",\"State\":\"busy\"}]}"))))
+    (let ((result (beemacs-api-dashboard-submodule "beemacs")))
+      (should (equal (alist-get 'State result) "busy")))))
+
+(ert-deftest beemacs-test-api-dashboard-submodule-no-match ()
+  "`beemacs-api-dashboard-submodule' returns nil when NAME is absent."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{\"subs\":[{\"Name\":\"alpha\"}]}")))
+    (should (null (beemacs-api-dashboard-submodule "beemacs")))))
+
+(ert-deftest beemacs-test-api-plan-path ()
+  "`beemacs-api-plan' hits the plan.json endpoint for the given submodule."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"name\":\"beemacs\",\"plan\":{\"Items\":[]}}"))))
+      (let ((result (beemacs-api-plan "beemacs")))
+        (should (string-suffix-p "/submodule/beemacs/plan.json" seen-url))
+        (should (equal (alist-get 'name result) "beemacs"))))))
+
+(ert-deftest beemacs-test-api-roi-path ()
+  "`beemacs-api-roi' hits the roi.json endpoint for the given submodule."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"name\":\"beemacs\",\"body\":\"# ROI\",\"remote_url\":\"u\"}"))))
+      (let ((result (beemacs-api-roi "beemacs")))
+        (should (string-suffix-p "/submodule/beemacs/roi.json" seen-url))
+        (should (equal (alist-get 'body result) "# ROI"))))))
+
+(ert-deftest beemacs-test-api-secrets-path ()
+  "`beemacs-api-secrets' hits the hive-wide secrets.json endpoint."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"global\":[],\"submodules\":[]}"))))
+      (beemacs-api-secrets)
+      (should (string-suffix-p "/secrets.json" seen-url)))))
+
+(ert-deftest beemacs-test-api-secrets-for-filters-by-name ()
+  "`beemacs-api-secrets-for' returns just NAME's `keys' vector."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"global\":[],\"submodules\":["
+                          "{\"name\":\"alpha\",\"keys\":[\"A\"]},"
+                          "{\"name\":\"beemacs\",\"keys\":[\"B\",\"C\"]}]}"))))
+    (should (equal (append (beemacs-api-secrets-for "beemacs") nil) '("B" "C")))))
+
+(ert-deftest beemacs-test-api-secrets-for-no-match ()
+  "`beemacs-api-secrets-for' returns nil when NAME is absent."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{\"global\":[],\"submodules\":[]}")))
+    (should (null (beemacs-api-secrets-for "beemacs")))))
+
+(ert-deftest beemacs-test-submodule-view-plan-body-renders-tasks ()
+  "`beemacs-submodule-view--plan-body' renders each task as one line."
+  (let ((plan '((Items . [((ID . "foo") (Status . "TODO") (Weight . 4) (Deps . ["bar"]))
+                          ((ID . "bar") (Status . "DONE") (Weight . 2) (Deps . []))]))))
+    (let ((out (beemacs-submodule-view--plan-body plan)))
+      (should (string-match-p "foo" out))
+      (should (string-match-p "\\[TODO\\]" out))
+      (should (string-match-p "bar" out))
+      (should (string-match-p "\\[DONE\\]" out)))))
+
+(ert-deftest beemacs-test-submodule-view-refresh-shows-summary ()
+  "`beemacs-submodule-view' populates its buffer with summary + nav lines."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\","
+                          "\"Stamp\":\"abc123\",\"Pending\":2,\"Human\":0,"
+                          "\"Env\":\"blue\",\"Working\":false,\"Bees\":1}]}"))))
+    (beemacs-submodule-view "beemacs")
+    (unwind-protect
+        (with-current-buffer "*beemacs-submodule: beemacs*"
+          (should (derived-mode-p 'beemacs-submodule-view-mode))
+          (should (equal beemacs-submodule-view--name "beemacs"))
+          (let ((text (buffer-string)))
+            (should (string-match-p "State: idle" text))
+            (should (string-match-p "ROI stamp: abc123" text))
+            (should (string-match-p "Pending: 2" text))
+            (should (string-match-p "\\[p\\] Plan" text))
+            (should (string-match-p "\\[o\\] ROI" text))
+            (should (string-match-p "\\[d\\] Docs" text))))
+      (when (get-buffer "*beemacs-submodule: beemacs*")
+        (kill-buffer "*beemacs-submodule: beemacs*")))))
+
+(ert-deftest beemacs-test-submodule-view-refresh-no-summary ()
+  "A submodule absent from the dashboard payload still renders navigation."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{\"subs\":[]}")))
+    (beemacs-submodule-view "ghost")
+    (unwind-protect
+        (with-current-buffer "*beemacs-submodule: ghost*"
+          (let ((text (buffer-string)))
+            (should (string-match-p "no dashboard summary available" text))
+            (should (string-match-p "\\[S\\] Secrets" text))))
+      (when (get-buffer "*beemacs-submodule: ghost*")
+        (kill-buffer "*beemacs-submodule: ghost*")))))
+
+(ert-deftest beemacs-test-submodule-view-plan-opens-plan-buffer ()
+  "RET on [p] fetches plan.json and renders it in a dedicated buffer."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
+    (beemacs-submodule-view "beemacs")
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'beemacs-transport--call)
+                     (beemacs-test--mock-call
+                      200 (concat "{\"name\":\"beemacs\",\"plan\":{\"Items\":"
+                                  "[{\"ID\":\"foo\",\"Status\":\"TODO\","
+                                  "\"Weight\":4,\"Deps\":[]}]}}"))))
+            (with-current-buffer "*beemacs-submodule: beemacs*"
+              (beemacs-submodule-view-plan)))
+          (with-current-buffer "*beemacs-plan: beemacs*"
+            (should (string-match-p "foo" (buffer-string)))
+            (should (string-match-p "\\[TODO\\]" (buffer-string)))))
+      (dolist (b '("*beemacs-submodule: beemacs*" "*beemacs-plan: beemacs*"))
+        (when (get-buffer b) (kill-buffer b))))))
+
+(ert-deftest beemacs-test-submodule-view-roi-opens-roi-buffer ()
+  "RET on [o] fetches roi.json and renders it read-only."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
+    (beemacs-submodule-view "beemacs")
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'beemacs-transport--call)
+                     (beemacs-test--mock-call
+                      200 "{\"name\":\"beemacs\",\"body\":\"# ROI text\"}")))
+            (with-current-buffer "*beemacs-submodule: beemacs*"
+              (beemacs-submodule-view-roi)))
+          (with-current-buffer "*beemacs-roi: beemacs*"
+            (should (string-match-p "# ROI text" (buffer-string)))
+            (should buffer-read-only)))
+      (dolist (b '("*beemacs-submodule: beemacs*" "*beemacs-roi: beemacs*"))
+        (when (get-buffer b) (kill-buffer b))))))
+
+(ert-deftest beemacs-test-submodule-view-secrets-opens-secrets-buffer ()
+  "RET on [S] fetches secrets.json filtered to this submodule's keys."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
+    (beemacs-submodule-view "beemacs")
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'beemacs-transport--call)
+                     (beemacs-test--mock-call
+                      200 (concat "{\"global\":[],\"submodules\":"
+                                  "[{\"name\":\"beemacs\",\"keys\":[\"TOKEN\"]}]}"))))
+            (with-current-buffer "*beemacs-submodule: beemacs*"
+              (beemacs-submodule-view-secrets)))
+          (with-current-buffer "*beemacs-secrets: beemacs*"
+            (should (string-match-p "TOKEN" (buffer-string)))))
+      (dolist (b '("*beemacs-submodule: beemacs*" "*beemacs-secrets: beemacs*"))
+        (when (get-buffer b) (kill-buffer b))))))
+
+(ert-deftest beemacs-test-submodule-view-sessions-reports-pending-gap ()
+  "The sessions drill-in reports the pending JSON-API gap via `message'."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
+    (beemacs-submodule-view "beemacs")
+    (unwind-protect
+        (with-current-buffer "*beemacs-submodule: beemacs*"
+          (let (msg)
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+              (beemacs-submodule-view-sessions))
+            (should (string-match-p "sessions.json" msg))))
+      (when (get-buffer "*beemacs-submodule: beemacs*")
+        (kill-buffer "*beemacs-submodule: beemacs*")))))
+
 (ert-deftest beemacs-test-render-skill-rows ()
   "The render layer builds tabulated-list rows from a skills.json-shaped payload."
   (let ((dances (vector '((Name . "modify-roi") (Title . "Modify an ROI")

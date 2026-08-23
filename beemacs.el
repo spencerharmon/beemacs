@@ -203,6 +203,192 @@ content as a unified diff computed client-side (see
       (view-mode 1))
     (pop-to-buffer buf)))
 
+;;; Submodule drill-in hub
+
+(defvar-local beemacs-submodule-view--name nil
+  "Submodule name the current `beemacs-submodule-view-mode' buffer is showing.")
+
+(define-derived-mode beemacs-submodule-view-mode special-mode "Beemacs-Submodule"
+  "Major mode for a per-submodule drill-in hub buffer.
+
+Mirrors the beehived web UI's submodule explorer (`GET /submodule/{name}'):
+a summary card (state, ROI stamp, pending/human counts, active env, live
+honeybee count) plus navigation into the plan/docs/sessions/branches/env/
+secrets/roi sub-views. Wired as `beemacs-dashboard''s RET target.
+\\{beemacs-submodule-view-mode-map}")
+
+(defun beemacs-submodule-view--insert-summary (name)
+  "Insert NAME's summary card into the current buffer at point.
+
+Sourced from `beemacs-api-dashboard-submodule' -- the same per-submodule
+card (state/stamp/pending/human/env/working/bees) the HTML dashboard
+renders. A submodule absent from the dashboard payload (e.g. one not yet
+tracked, or a transient fetch gap) renders a placeholder line rather than
+erroring, so the hub's navigation section below is always reachable."
+  (let ((summary (beemacs-api-dashboard-submodule name)))
+    (if summary
+        (insert
+         (format "State: %s\n" (or (alist-get 'State summary) ""))
+         (format "ROI stamp: %s\n" (or (alist-get 'Stamp summary) ""))
+         (format "Pending: %s   Human: %s\n"
+                 (or (alist-get 'Pending summary) 0)
+                 (or (alist-get 'Human summary) 0))
+         (format "Env: %s   Active bees: %s   Working: %s\n"
+                 (or (alist-get 'Env summary) "")
+                 (or (alist-get 'Bees summary) 0)
+                 (if (alist-get 'Working summary) "yes" "no")))
+      (insert "(no dashboard summary available for this submodule)\n"))))
+
+(defun beemacs-submodule-view-refresh ()
+  "Refetch and redisplay the current `beemacs-submodule-view-mode' buffer."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (let ((name beemacs-submodule-view--name)
+        (inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "Submodule: %s\n\n" name))
+    (beemacs-submodule-view--insert-summary name)
+    (insert "\nNavigation:\n")
+    (insert "  [p] Plan       [o] ROI        [d] Docs\n")
+    (insert "  [b] Branches   [s] Sessions   [e] Env\n")
+    (insert "  [S] Secrets    [g] Refresh\n")
+    (goto-char (point-min))))
+
+(defun beemacs-submodule-view--plan-body (plan)
+  "Render PLAN (a `plan.json'-shaped `plan' alist) as plain lines."
+  (mapconcat
+   (lambda (item)
+     (format "%-30s [%s] weight=%s deps=%s"
+             (or (alist-get 'ID item) "")
+             (or (alist-get 'Status item) "")
+             (or (alist-get 'Weight item) 0)
+             (mapconcat #'identity (append (alist-get 'Deps item) nil) ",")))
+   (append (alist-get 'Items plan) nil)
+   "\n"))
+
+(defun beemacs-submodule-view-plan ()
+  "Show the submodule's PLAN.md tasks (mirrors `GET /submodule/{name}/plan')."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (let* ((name beemacs-submodule-view--name)
+         (data (beemacs-api-plan name))
+         (buf (get-buffer-create (format "*beemacs-plan: %s*" name))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (beemacs-submodule-view--plan-body (alist-get 'plan data)))
+        (goto-char (point-min)))
+      (special-mode))
+    (pop-to-buffer buf)))
+
+(defun beemacs-submodule-view-roi ()
+  "Show the submodule's raw ROI.md content (mirrors `GET /roi/{name}')."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (let* ((name beemacs-submodule-view--name)
+         (data (beemacs-api-roi name))
+         (buf (get-buffer-create (format "*beemacs-roi: %s*" name))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (or (alist-get 'body data) ""))
+        (goto-char (point-min)))
+      (view-mode 1)
+      (setq buffer-read-only t))
+    (pop-to-buffer buf)))
+
+(defun beemacs-submodule-view-docs ()
+  "Drill into the submodule's docs/ change-record explorer."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (beemacs-docs-view beemacs-submodule-view--name))
+
+(defun beemacs-submodule-view-branches ()
+  "Drill into the submodule's commit/branches explorer."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (beemacs-branches-view beemacs-submodule-view--name))
+
+(defun beemacs-submodule-view-secrets ()
+  "Show the submodule's own secrets key-name listing (never values)."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (let* ((name beemacs-submodule-view--name)
+         (keys (append (beemacs-api-secrets-for name) nil))
+         (buf (get-buffer-create (format "*beemacs-secrets: %s*" name))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Secrets for %s:\n\n" name))
+        (if keys
+            (dolist (k keys) (insert (format "  %s\n" k)))
+          (insert "  (none)\n"))
+        (goto-char (point-min)))
+      (view-mode 1)
+      (setq buffer-read-only t))
+    (pop-to-buffer buf)))
+
+(defun beemacs-submodule-view-sessions ()
+  "Drill into the submodule's session list.
+
+The `beehive:beemacs-json-api' contract has not yet added a
+`sessions.json' endpoint (only `GET /submodule/{name}/sessions' HTML), so
+this drill-in cannot render structured data from JSON today; it reports
+that gap rather than scraping HTML or faking a result."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (message "Sessions drill-in pending a sessions.json endpoint (see beemacs-session-stream); visit /submodule/%s/sessions in a browser meanwhile"
+           beemacs-submodule-view--name))
+
+(defun beemacs-submodule-view-env ()
+  "Drill into the submodule's deploy-env view.
+
+The `beehive:beemacs-json-api' contract has not yet added an `env.json'
+endpoint (only `GET /submodule/{name}/env' HTML), so this drill-in cannot
+render structured data from JSON today; it reports that gap rather than
+scraping HTML or faking a result."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-submodule-view-mode)
+    (user-error "Not in a beemacs-submodule-view-mode buffer"))
+  (message "Env drill-in pending an env.json endpoint (see beemacs-instruction-env); visit /submodule/%s/env in a browser meanwhile"
+           beemacs-submodule-view--name))
+
+(defvar beemacs-submodule-view-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map "g" #'beemacs-submodule-view-refresh)
+    (define-key map "p" #'beemacs-submodule-view-plan)
+    (define-key map "o" #'beemacs-submodule-view-roi)
+    (define-key map "d" #'beemacs-submodule-view-docs)
+    (define-key map "b" #'beemacs-submodule-view-branches)
+    (define-key map "s" #'beemacs-submodule-view-sessions)
+    (define-key map "e" #'beemacs-submodule-view-env)
+    (define-key map "S" #'beemacs-submodule-view-secrets)
+    map)
+  "Keymap for `beemacs-submodule-view-mode'.")
+
+;;;###autoload
+(defun beemacs-submodule-view (name)
+  "Open NAME's drill-in hub buffer: summary + sub-view navigation.
+
+Mirrors the beehived web UI's submodule explorer (`GET /submodule/{name}');
+wired as `beemacs-dashboard''s RET target so a dashboard row drills
+straight into this hub."
+  (interactive "sSubmodule name: ")
+  (let ((buf (get-buffer-create (format "*beemacs-submodule: %s*" name))))
+    (with-current-buffer buf
+      (beemacs-submodule-view-mode)
+      (setq beemacs-submodule-view--name name)
+      (beemacs-submodule-view-refresh))
+    (pop-to-buffer buf)))
+
 ;;; Skills registry browser
 
 (define-derived-mode beemacs-skills-mode tabulated-list-mode "Beemacs-Skills"

@@ -206,6 +206,77 @@ content as a unified diff computed client-side (see
       (view-mode 1))
     (pop-to-buffer buf)))
 
+;;; Swarm dashboard
+
+(define-derived-mode beemacs-dashboard-mode tabulated-list-mode "Beemacs-Dashboard"
+  "Major mode for the hive-wide swarm overview buffer.
+
+Mirrors the beehived web UI's dashboard (`GET /dashboard.json'): one row
+per tracked submodule, its state/ROI stamp, pending/human task counts,
+active deploy env, whether a pass is currently working it, and its live
+honeybee count. `RET' drills into `beemacs-submodule-view'.
+\\{beemacs-dashboard-mode-map}"
+  (setq tabulated-list-format [("Name" 20 t) ("State" 12 t)
+                                ("Pending" 8 t) ("Human" 6 t)
+                                ("Env" 12 t) ("Working" 8 t)
+                                ("Bees" 5 t)])
+  (setq tabulated-list-sort-key (cons "Name" nil))
+  (tabulated-list-init-header))
+
+(defun beemacs-dashboard-refresh ()
+  "Refetch and redisplay the current `beemacs-dashboard-mode' buffer.
+
+Re-fetches `beemacs-api-dashboard' live -- the dashboard is never a
+static snapshot, since a swarm's per-submodule state (pending/human
+counts, active passes, bee count) changes continuously as honeybees
+work."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-dashboard-mode)
+    (user-error "Not in a beemacs-dashboard-mode buffer"))
+  (let ((data (beemacs-api-dashboard)))
+    (setq tabulated-list-entries
+          (beemacs-render-dashboard-rows (alist-get 'subs data)))
+    (tabulated-list-print t)))
+
+(defun beemacs-dashboard-open-at-point ()
+  "Drill into the submodule at point via `beemacs-submodule-view'."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-dashboard-mode)
+    (user-error "Not in a beemacs-dashboard-mode buffer"))
+  (let ((name (tabulated-list-get-id)))
+    (unless name
+      (user-error "No submodule at point"))
+    (beemacs-submodule-view name)))
+
+(defvar beemacs-dashboard-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map "g" #'beemacs-dashboard-refresh)
+    (define-key map (kbd "RET") #'beemacs-dashboard-open-at-point)
+    map)
+  "Keymap for `beemacs-dashboard-mode'.")
+
+;;;###autoload
+(defun beemacs-dashboard ()
+  "Open the hive-wide swarm overview buffer.
+
+Lists every tracked submodule with its state, ROI stamp status, pending/
+human task counts, active deploy env, whether a pass is currently
+working it, and its live honeybee count -- sourced from the
+`beehive:beemacs-json-api' dashboard JSON endpoint (`beemacs-api-
+dashboard'), the same data the HTML dashboard renders. `g' re-fetches
+live; `RET' on a row drills into `beemacs-submodule-view' for that
+submodule."
+  (interactive)
+  (let* ((data (beemacs-api-dashboard))
+         (buf (get-buffer-create "*beemacs-dashboard*")))
+    (with-current-buffer buf
+      (beemacs-dashboard-mode)
+      (setq tabulated-list-entries
+            (beemacs-render-dashboard-rows (alist-get 'subs data)))
+      (tabulated-list-print t))
+    (pop-to-buffer buf)))
+
 ;;; Submodule drill-in hub
 
 (defvar-local beemacs-submodule-view--name nil

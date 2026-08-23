@@ -75,6 +75,28 @@ with TITLE and SUMMARY as display columns."
                                   (or (alist-get 'Summary d) "")))))
           (append dances nil)))
 
+(defun beemacs-render-dashboard-rows (subs)
+  "Return `tabulated-list-entries'-shaped rows from SUBS.
+
+SUBS is a vector of alists as returned under the `subs' key of
+`beemacs-api-dashboard', each carrying the capitalized `subView' struct
+fields (`Name', `State', `Stamp', `Pending', `Human', `Env', `Working',
+`Bees' -- no json tags on the Go struct, so decoded keys are the exact
+capitalized field names). Each row is `(NAME [NAME STATE PENDING HUMAN
+ENV WORKING BEES])', keyed by the submodule's unique NAME, so `RET' in a
+`beemacs-dashboard-mode' buffer can drill into `beemacs-submodule-view'."
+  (mapcar (lambda (s)
+            (let ((name (alist-get 'Name s)))
+              (list name (vector (or name "")
+                                  (or (alist-get 'State s) "")
+                                  (format "%s" (or (alist-get 'Pending s) 0))
+                                  (format "%s" (or (alist-get 'Human s) 0))
+                                  (or (alist-get 'Env s) "")
+                                  (if (memq (alist-get 'Working s) '(nil :json-false))
+                                      "no" "yes")
+                                  (format "%s" (or (alist-get 'Bees s) 0))))))
+          (append subs nil)))
+
 (defun beemacs-render-diff-lines (before-text after-text)
   "Return a per-line diff between BEFORE-TEXT and AFTER-TEXT.
 

@@ -171,6 +171,28 @@ access; this is a pure read projection."
                                 (beemacs-render--claim-state it)))))
           (append items nil)))
 
+(defun beemacs-render-human-rows (tasks)
+  "Return `tabulated-list-entries'-shaped rows from TASKS.
+
+TASKS is a vector of alists as returned under the `tasks' key of
+`beemacs-api-human', each carrying lower-case keys `sub', `id', `desc',
+`body', `deps', `reason', `category' (`humanJSON' builds its own
+response map rather than marshaling a struct, so keys are lower-case,
+unlike the capitalized `PlanItem'-derived rows elsewhere). Each row is
+`((SUB . ID) [SUB ID DESC CATEGORY REASON])', keyed by the `(SUB . ID)'
+cons -- a bare ID is not unique hive-wide across submodules, so the pair
+is this listing's real primary key -- with DESC/CATEGORY/REASON as
+display columns."
+  (mapcar (lambda (tk)
+            (let ((sub (alist-get 'sub tk))
+                  (id (alist-get 'id tk)))
+              (list (cons sub id)
+                    (vector (or sub "") (or id "")
+                            (or (alist-get 'desc tk) "")
+                            (or (alist-get 'category tk) "")
+                            (or (alist-get 'reason tk) "")))))
+          (append tasks nil)))
+
 (defun beemacs-render-diff-lines (before-text after-text)
   "Return a per-line diff between BEFORE-TEXT and AFTER-TEXT.
 

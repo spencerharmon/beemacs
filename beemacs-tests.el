@@ -23,6 +23,7 @@
 (require 'beemacs-pi-model)
 (require 'beemacs-streaming)
 (require 'beemacs-session)
+(require 'beemacs-human)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -1750,6 +1751,254 @@ generic \"done\" message."
       (beemacs-merge "beemacs" "bee-foo")
       (should (string-match-p "FAILED" msg))
       (should (string-match-p "merge conflict" msg)))))
+
+;;; beemacs-human tests
+
+(ert-deftest beemacs-test-render-human-rows ()
+  "The render layer builds tabulated-list rows from a human.json-shaped payload."
+  (let ((tasks (vector '((sub . "jellyfin") (id . "t1") (desc . "need a secret")
+                         (deps . ["a" "b"]) (reason . "need X")
+                         (category . "secret"))
+                       '((sub . "beemacs") (id . "t2") (desc . "arch call")
+                         (deps . []) (reason . "pick a wire format")
+                         (category . "architecture")))))
+    (should (equal (beemacs-render-human-rows tasks)
+                   `((("jellyfin" . "t1")
+                      ["jellyfin" "t1" "need a secret" "secret" "need X"])
+                     (("beemacs" . "t2")
+                      ["beemacs" "t2" "arch call" "architecture" "pick a wire format"]))))))
+
+(ert-deftest beemacs-test-human-list-populates-rows ()
+  "`beemacs-human-list' fetches human.json and lists every NEEDS-HUMAN task."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil
+                       (concat "{\"tasks\":[{\"sub\":\"jellyfin\",\"id\":\"t1\","
+                               "\"desc\":\"need a secret\",\"deps\":[],"
+                               "\"reason\":\"need X\",\"category\":\"secret\"}]}")))))
+      (beemacs-human-list)
+      (unwind-protect
+          (with-current-buffer "*beemacs-human*"
+            (should (string-suffix-p "/human.json" seen-url))
+            (should (derived-mode-p 'beemacs-human-list-mode))
+            (should (equal tabulated-list-entries
+                            '((("jellyfin" . "t1")
+                               ["jellyfin" "t1" "need a secret" "secret" "need X"])))))
+        (when (get-buffer "*beemacs-human*")
+          (kill-buffer "*beemacs-human*"))))))
+
+(ert-deftest beemacs-test-human-list-refresh-refetches ()
+  "`beemacs-human-list-refresh' re-fetches and redisplays entries."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{\"tasks\":[]}")))
+    (beemacs-human-list))
+  (unwind-protect
+      (with-current-buffer "*beemacs-human*"
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--mock-call
+                    200 (concat "{\"tasks\":[{\"sub\":\"beehive\",\"id\":\"t9\","
+                                "\"desc\":\"d\",\"deps\":[],\"reason\":\"r\","
+                                "\"category\":\"contradiction\"}]}"))))
+          (beemacs-human-list-refresh))
+        (should (equal tabulated-list-entries
+                        '((("beehive" . "t9")
+                           ["beehive" "t9" "d" "contradiction" "r"])))))
+    (when (get-buffer "*beemacs-human*")
+      (kill-buffer "*beemacs-human*"))))
+
+(ert-deftest beemacs-test-human-list-open-at-point-opens-resolve-view ()
+  "RET in `beemacs-human-list-mode' opens the resolution workspace for the
+task at point."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"tasks\":[{\"sub\":\"jellyfin\",\"id\":\"t1\","
+                          "\"desc\":\"d\",\"deps\":[],\"reason\":\"r\","
+                          "\"category\":\"secret\"}]}"))))
+    (beemacs-human-list))
+  (unwind-protect
+      (progn
+        (with-current-buffer "*beemacs-human*"
+          (goto-char (point-min))
+          (let (opened-sub opened-id)
+            (cl-letf (((symbol-function 'beemacs-human-resolve-view)
+                       (lambda (sub id) (setq opened-sub sub opened-id id))))
+              (beemacs-human-list-open-at-point))
+            (should (equal opened-sub "jellyfin"))
+            (should (equal opened-id "t1")))))
+    (when (get-buffer "*beemacs-human*")
+      (kill-buffer "*beemacs-human*"))))
+
+(defun beemacs-test--human-mock-call (responses)
+  "Return a mock `beemacs-transport--call' dispatching on URL SUFFIX.
+
+RESPONSES is an alist of (SUFFIX . BODY); the first entry whose SUFFIX
+the requested URL ends with supplies the 200 JSON BODY returned. Errors
+if no entry matches, so a test never silently mis-mocks an unexpected
+call."
+  (lambda (url)
+    (let ((hit (cl-find-if (lambda (r) (string-suffix-p (car r) url)) responses)))
+      (unless hit
+        (error "beemacs-test--human-mock-call: no mock for %s" url))
+      (list 200 nil (cdr hit)))))
+
+(ert-deftest beemacs-test-human-resolve-view-opens-and-renders-context ()
+  "`beemacs-human-resolve-view' fetches task context + opens a session and
+renders both the static context and the live transcript."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--human-mock-call
+              '(("/human.json/jellyfin/t1" .
+                 "{\"sub\":\"jellyfin\",\"id\":\"t1\",\"desc\":\"need a secret\",\"body\":\"full body\",\"deps\":[],\"reason\":\"need X\",\"category\":\"secret\",\"has_session\":false}")
+                ("/session" .
+                 "{\"sid\":\"h1\",\"Log\":[],\"Stat\":\"\",\"HasChange\":false,\"Busy\":false,\"Published\":false}")))))
+    (unwind-protect
+        (progn
+          (beemacs-human-resolve-view "jellyfin" "t1")
+          (with-current-buffer "*beemacs-human: jellyfin/t1*"
+            (should (derived-mode-p 'beemacs-human-resolve-mode))
+            (should (equal beemacs-human-resolve--sub "jellyfin"))
+            (should (equal beemacs-human-resolve--id "t1"))
+            (should (equal beemacs-human-resolve--sid "h1"))
+            (should (string-match-p "need a secret" (buffer-string)))
+            (should (string-match-p "full body" (buffer-string)))
+            (should (string-match-p "no messages yet" (buffer-string)))))
+      (when (get-buffer "*beemacs-human: jellyfin/t1*")
+        (kill-buffer "*beemacs-human: jellyfin/t1*")))))
+
+(ert-deftest beemacs-test-human-resolve-message-appends-transcript ()
+  "`beemacs-human-resolve-message' sends a message and renders the resolver's
+real reply in the transcript."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--human-mock-call
+              '(("/human.json/jellyfin/t1" .
+                 "{\"sub\":\"jellyfin\",\"id\":\"t1\",\"desc\":\"d\",\"body\":\"\",\"deps\":[],\"reason\":\"r\",\"category\":\"secret\"}")
+                ("/session" .
+                 "{\"sid\":\"h2\",\"Log\":[],\"Stat\":\"\",\"HasChange\":false,\"Busy\":false,\"Published\":false}")))))
+    (beemacs-human-resolve-view "jellyfin" "t1"))
+  (unwind-protect
+      (cl-letf (((symbol-function 'beemacs-transport--call)
+                 (beemacs-test--mock-call
+                  200 (concat "{\"Log\":[{\"role\":\"user\",\"text\":\"please help\"},"
+                              "{\"role\":\"agent\",\"text\":\"working on it\"}],"
+                              "\"Stat\":\"1 file changed\",\"HasChange\":true,"
+                              "\"Busy\":false,\"Published\":false}"))))
+        (with-current-buffer "*beemacs-human: jellyfin/t1*"
+          (beemacs-human-resolve-message "please help")
+          (should (string-match-p "please help" (buffer-string)))
+          (should (string-match-p "working on it" (buffer-string)))
+          (should (string-match-p "1 file changed" (buffer-string)))
+          (should (string-match-p "has-change" (buffer-string)))))
+    (when (get-buffer "*beemacs-human: jellyfin/t1*")
+      (kill-buffer "*beemacs-human: jellyfin/t1*"))))
+
+(ert-deftest beemacs-test-human-resolve-publish-reports-published-state ()
+  "`beemacs-human-resolve-publish' publishes and reflects the returned
+Published state in the transcript."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--human-mock-call
+              '(("/human.json/jellyfin/t1" .
+                 "{\"sub\":\"jellyfin\",\"id\":\"t1\",\"desc\":\"d\",\"body\":\"\",\"deps\":[],\"reason\":\"r\",\"category\":\"secret\"}")
+                ("/session" .
+                 "{\"sid\":\"h3\",\"Log\":[],\"Stat\":\"\",\"HasChange\":true,\"Busy\":false,\"Published\":false}")))))
+    (beemacs-human-resolve-view "jellyfin" "t1"))
+  (unwind-protect
+      (cl-letf (((symbol-function 'beemacs-transport--call)
+                 (beemacs-test--mock-call
+                  200 "{\"Log\":[],\"Stat\":\"\",\"HasChange\":true,\"Busy\":false,\"Published\":true}")))
+        (with-current-buffer "*beemacs-human: jellyfin/t1*"
+          (beemacs-human-resolve-publish)
+          (should (string-match-p "published" (buffer-string)))))
+    (when (get-buffer "*beemacs-human: jellyfin/t1*")
+      (kill-buffer "*beemacs-human: jellyfin/t1*"))))
+
+(ert-deftest beemacs-test-human-resolve-publish-surfaces-embedded-error ()
+  "`beemacs-human-resolve-publish' surfaces the panel's embedded `error' key
+via `message' when the server reports a publish failure."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--human-mock-call
+              '(("/human.json/jellyfin/t1" .
+                 "{\"sub\":\"jellyfin\",\"id\":\"t1\",\"desc\":\"d\",\"body\":\"\",\"deps\":[],\"reason\":\"r\",\"category\":\"secret\"}")
+                ("/session" .
+                 "{\"sid\":\"h4\",\"Log\":[],\"Stat\":\"\",\"HasChange\":true,\"Busy\":false,\"Published\":false}")))))
+    (beemacs-human-resolve-view "jellyfin" "t1"))
+  (unwind-protect
+      (let (msg)
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--mock-call
+                    200 "{\"error\":\"publish conflict\",\"Log\":[],\"HasChange\":true}"))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+          (with-current-buffer "*beemacs-human: jellyfin/t1*"
+            (beemacs-human-resolve-publish)))
+        (should (string-match-p "publish conflict" msg)))
+    (when (get-buffer "*beemacs-human: jellyfin/t1*")
+      (kill-buffer "*beemacs-human: jellyfin/t1*"))))
+
+(ert-deftest beemacs-test-human-resolve-discard-adopts-new-session ()
+  "`beemacs-human-resolve-discard' adopts the fresh session id the server
+returns for a still-blocked task."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--human-mock-call
+              '(("/human.json/jellyfin/t1" .
+                 "{\"sub\":\"jellyfin\",\"id\":\"t1\",\"desc\":\"d\",\"body\":\"\",\"deps\":[],\"reason\":\"r\",\"category\":\"secret\"}")
+                ("/session" .
+                 "{\"sid\":\"h5\",\"Log\":[],\"Stat\":\"\",\"HasChange\":true,\"Busy\":false,\"Published\":false}")))))
+    (beemacs-human-resolve-view "jellyfin" "t1"))
+  (unwind-protect
+      (progn
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--human-mock-call
+                    '(("/discard/h5" . "{\"sid\":\"h6\"}")
+                      ("/panel/h6" .
+                       "{\"Log\":[],\"Stat\":\"\",\"HasChange\":false,\"Busy\":false,\"Published\":false}")))))
+          (with-current-buffer "*beemacs-human: jellyfin/t1*"
+            (beemacs-human-resolve-discard)
+            (should (equal beemacs-human-resolve--sid "h6")))))
+    (when (get-buffer "*beemacs-human: jellyfin/t1*")
+      (kill-buffer "*beemacs-human: jellyfin/t1*"))))
+
+(ert-deftest beemacs-test-human-resolve-apply-confirms-and-calls-resolve ()
+  "`beemacs-human-resolve-apply' confirms via `yes-or-no-p' then calls the
+sanctioned resolve endpoint, never a direct PLAN.md write."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--human-mock-call
+              '(("/human.json/jellyfin/t1" .
+                 "{\"sub\":\"jellyfin\",\"id\":\"t1\",\"desc\":\"d\",\"body\":\"\",\"deps\":[],\"reason\":\"r\",\"category\":\"secret\"}")
+                ("/session" .
+                 "{\"sid\":\"h7\",\"Log\":[],\"Stat\":\"\",\"HasChange\":false,\"Busy\":false,\"Published\":false}")))))
+    (beemacs-human-resolve-view "jellyfin" "t1"))
+  (unwind-protect
+      (let (called-sub called-id)
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                  ((symbol-function 'beemacs-api-human-resolve)
+                   (lambda (sub id) (setq called-sub sub called-id id))))
+          (with-current-buffer "*beemacs-human: jellyfin/t1*"
+            (beemacs-human-resolve-apply)))
+        (should (equal called-sub "jellyfin"))
+        (should (equal called-id "t1")))
+    (when (get-buffer "*beemacs-human: jellyfin/t1*")
+      (kill-buffer "*beemacs-human: jellyfin/t1*"))))
+
+(ert-deftest beemacs-test-human-resolve-apply-declines-without-confirmation ()
+  "`beemacs-human-resolve-apply' never calls the resolve endpoint when the
+user declines confirmation."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--human-mock-call
+              '(("/human.json/jellyfin/t1" .
+                 "{\"sub\":\"jellyfin\",\"id\":\"t1\",\"desc\":\"d\",\"body\":\"\",\"deps\":[],\"reason\":\"r\",\"category\":\"secret\"}")
+                ("/session" .
+                 "{\"sid\":\"h8\",\"Log\":[],\"Stat\":\"\",\"HasChange\":false,\"Busy\":false,\"Published\":false}")))))
+    (beemacs-human-resolve-view "jellyfin" "t1"))
+  (unwind-protect
+      (let (called)
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil))
+                  ((symbol-function 'beemacs-api-human-resolve)
+                   (lambda (&rest _) (setq called t))))
+          (with-current-buffer "*beemacs-human: jellyfin/t1*"
+            (beemacs-human-resolve-apply)))
+        (should-not called))
+    (when (get-buffer "*beemacs-human: jellyfin/t1*")
+      (kill-buffer "*beemacs-human: jellyfin/t1*"))))
 
 (provide 'beemacs-tests)
 

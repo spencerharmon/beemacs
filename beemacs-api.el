@@ -366,6 +366,100 @@ ENDPOINT optionally overrides `beemacs-endpoint' for this call only."
        "/merge" `(("name" . ,name) ("branch" . ,branch)) endpoint)
     (beemacs-http-error (beemacs-api--handle-form-http-error err "/merge"))))
 
+(defun beemacs-api-human ()
+  "Return the hive-wide NEEDS-HUMAN task listing across every tracked submodule.
+
+Mirrors `GET /human.json' (beehived's `humanJSON', internal/web/jsonapi.go),
+the same scan the HTML `/human' list page renders. The returned alist
+carries a single `tasks' key: a vector of alists with keys `sub', `id',
+`desc', `body', `deps', `reason' (the blocker's `HumanReason'), and
+`category' -- all lower-case, since `humanJSON' builds its own response
+map rather than marshaling a struct. Hive-wide -- takes no submodule
+name, like `beemacs-api-skills'/`beemacs-api-stats'."
+  (beemacs-api-json-request "/human.json"))
+
+(defun beemacs-api-human-task (sub id)
+  "Return one NEEDS-HUMAN task's context for submodule SUB's task ID.
+
+Mirrors `GET /human.json/{sub}/{id}' (beehived's `humanTaskJSON'), the
+same lookup `humanResolvePage' uses. The returned alist carries `sub',
+`id', `desc', `body', `deps', `reason', `category', and `has_session'
+(whether a resolution agent session already exists for this task). A
+task that is unknown or no longer `NEEDS-HUMAN' 404s, surfaced as
+`beemacs-api-error' via `beemacs-api-json-request''s normal handling."
+  (beemacs-api-json-request (format "/human.json/%s/%s" sub id)))
+
+(defun beemacs-api-human-session (sub id)
+  "Open (or return the existing) resolution session for SUB's task ID.
+
+Mirrors `POST /api/human/{sub}/{id}/session' (beehived's
+`apiHumanSession'), which opens the same AI resolution-agent session the
+HTML `/human/{sub}/{id}' resolve page uses. Returns the panel-shaped
+alist (`sid'/`SessID', `Sub', `TaskID', `Log', `Stat', `Diffs',
+`HasChange', `Busy', `Published', `Error') -- see `beemacs-api-human-panel'
+for the field meanings."
+  (beemacs-api-json-post (format "/api/human/%s/%s/session" sub id) '()))
+
+(defun beemacs-api-human-panel (sub id sid)
+  "Poll session SID's live resolution panel for SUB's task ID.
+
+Mirrors `GET /api/human/{sub}/{id}/panel/{sid}' (beehived's
+`apiHumanPanel'), the JSON mirror of `humanResolvePanel'. The returned
+alist carries `SessID', `Sub', `TaskID', `Log' (a vector of
+`{role,text,at}' turns), `Stat' (a diffstat string), `Diffs' (a vector of
+per-file diff boxes), `HasChange', `Busy' (a turn is in flight), and
+`Published' (the branch has landed on main via a completed agent turn)."
+  (beemacs-api-json-request (format "/api/human/%s/%s/panel/%s" sub id sid)))
+
+(defun beemacs-api-human-message (sub id sid message)
+  "Send MESSAGE to session SID resolving SUB's task ID, run one agent turn.
+
+Mirrors `POST /api/human/{sub}/{id}/message/{sid}' (beehived's
+`apiHumanMessage'), the JSON mirror of `humanResolveMessage': runs the
+resolution agent's turn synchronously with `{\"message\": MESSAGE}' as the
+body and returns the refreshed panel (same shape as
+`beemacs-api-human-panel')."
+  (beemacs-api-json-post
+   (format "/api/human/%s/%s/message/%s" sub id sid)
+   `((message . ,message))))
+
+(defun beemacs-api-human-publish (sub id sid)
+  "Publish session SID's committed changes for SUB's task ID to main.
+
+Mirrors `POST /api/human/{sub}/{id}/publish/{sid}' (beehived's
+`apiHumanPublish'), the JSON mirror of `humanResolvePublish': lands the
+resolution agent's accumulated branch changes on the hive main. Returns
+the refreshed panel, carrying an `error' key instead of signaling on a
+publish failure (the server itself never returns non-2xx here -- see
+`apiHumanPublish') -- callers should check the returned alist's `error'
+key in addition to the normal `beemacs-api-error' failure path."
+  (beemacs-api-json-post (format "/api/human/%s/%s/publish/%s" sub id sid) '()))
+
+(defun beemacs-api-human-discard (sub id sid)
+  "Discard session SID's unpublished work for SUB's task ID.
+
+Mirrors `POST /api/human/{sub}/{id}/discard/{sid}' (beehived's
+`apiHumanDiscard'), the JSON mirror of `humanResolveDiscard': tears down
+the resolution agent's worktree/branch by session id and, when the task
+is still `NEEDS-HUMAN', opens a fresh session so the operator can restart
+cleanly. Returns `{\"sid\": ...}' -- the new session id, or nil/`:null'
+when the task is no longer blocked."
+  (beemacs-api-json-post (format "/api/human/%s/%s/discard/%s" sub id sid) '()))
+
+(defun beemacs-api-human-resolve (sub id)
+  "Flip SUB's NEEDS-HUMAN task ID back to TODO via the sanctioned backend flow.
+
+Mirrors `POST /api/human/{sub}/{id}/resolve' (beehived's
+`apiHumanResolve'), the JSON mirror of `humanResolveApply': the
+deterministic `plan.Task.Resolve' + `publishMain' flow (never a direct
+`PLAN.md'/`ROI.md' edit from this client) -- the same status flip + main
+publish the HTML \"Mark resolved\" button drives. Rejects (via
+`beemacs-api-error', a non-2xx `writeJSON' response) a task that is no
+longer `NEEDS-HUMAN' (already resolved, or never blocked), so a
+double-submit or a stale view can never reset an in-flight task's
+status/claim."
+  (beemacs-api-json-post (format "/api/human/%s/%s/resolve" sub id) '()))
+
 (defun beemacs-api-plan (name &optional endpoint)
   "Return the parsed plan payload for submodule NAME.
 

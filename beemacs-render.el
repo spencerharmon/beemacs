@@ -97,6 +97,59 @@ ENV WORKING BEES])', keyed by the submodule's unique NAME, so `RET' in a
                                   (format "%s" (or (alist-get 'Bees s) 0))))))
           (append subs nil)))
 
+(defun beemacs-render--json-true-p (value)
+  "Return non-nil when VALUE is JSON `true' as decoded by `json-read'.
+
+`json-read' (with the alist/vector/symbol settings this package uses)
+decodes JSON `false' as the symbol `:json-false' and JSON `null'/absent
+as `nil' -- both of which are non-nil Lisp values, so a bare `(if value
+...)' test is wrong for a JSON boolean. Only `t' and `:json-false' are
+ever produced for a JSON boolean field; anything else (nil/absent) is
+treated as false too."
+  (eq value t))
+
+(defun beemacs-render--claim-state (item)
+  "Return ITEM's unified claim-state label: \"active <session>\",
+\"stale <session>\", or \"\" when unclaimed.
+
+ITEM is one decoded `PlanItem' alist (capitalized Go field names,
+`Session'/`Active'/`Stale'). Mirrors the web UI's claim-state pill:
+`Active' means a fresh session+heartbeat claim, `Stale' means a past-TTL
+claim (GC-reclaimable), and both false means unclaimed -- `Active'/
+`Stale' are themselves JSON booleans, so `beemacs-render--json-true-p'
+(not a bare truthiness test) decides between them."
+  (let ((session (or (alist-get 'Session item) ""))
+        (active (beemacs-render--json-true-p (alist-get 'Active item)))
+        (stale (beemacs-render--json-true-p (alist-get 'Stale item))))
+    (cond
+     ((and active (not (string-empty-p session))) (format "active %s" session))
+     ((and stale (not (string-empty-p session))) (format "stale %s" session))
+     (t ""))))
+
+(defun beemacs-render-plan-rows (items)
+  "Return `tabulated-list-entries'-shaped rows from ITEMS.
+
+ITEMS is a vector of alists as returned under the `plan.Items' key of
+`beemacs-api-plan', each carrying the capitalized `PlanItem' struct
+fields (`ID', `Status', `Weight', `Deps', `Session', `Active', `Stale',
+... -- `PlanItem' has no json tags, so decoded keys are the exact
+capitalized Go field names). Each row is `(ID [ID STATUS WEIGHT DEPS
+CLAIM])', keyed by the task's unique ID (unique within one submodule's
+plan), with STATUS/WEIGHT/DEPS/CLAIM (the unified claim-state label from
+`beemacs-render--claim-state') as display columns -- DEPS is a
+comma-joined list of dependency task ids. Never carries `PLAN.md' write
+access; this is a pure read projection."
+  (mapcar (lambda (it)
+            (let ((id (alist-get 'ID it)))
+              (list id (vector (or id "")
+                                (or (alist-get 'Status it) "")
+                                (format "%s" (or (alist-get 'Weight it) 0))
+                                (mapconcat #'identity
+                                           (append (alist-get 'Deps it) nil)
+                                           ",")
+                                (beemacs-render--claim-state it)))))
+          (append items nil)))
+
 (defun beemacs-render-diff-lines (before-text after-text)
   "Return a per-line diff between BEFORE-TEXT and AFTER-TEXT.
 

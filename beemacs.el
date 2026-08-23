@@ -206,6 +206,133 @@ content as a unified diff computed client-side (see
       (view-mode 1))
     (pop-to-buffer buf)))
 
+;;; Plan browser
+
+(defvar-local beemacs-plan--submodule nil
+  "Submodule name the current `beemacs-plan-mode' buffer is browsing.")
+
+(defvar-local beemacs-plan--items nil
+  "Alist of task ID -> its decoded `PlanItem' alist for the current buffer.
+
+Populated by `beemacs-plan-refresh'/`beemacs-plan-view' from the latest
+`beemacs-api-plan' fetch, so `beemacs-plan-open-at-point' can resolve a
+row back to its `DocHref'/`Running'/`SessionHref' fields without a
+second network round-trip -- `tabulated-list-entries' only carries the
+display columns.")
+
+(define-derived-mode beemacs-plan-mode tabulated-list-mode "Beemacs-Plan"
+  "Major mode listing a submodule's live PLAN.md tasks, read-only.
+
+Mirrors the beehived web UI's plan view (`GET /submodule/{name}/plan'):
+one row per task with its id/status/weight/deps/unified claim state.
+Never writes `PLAN.md' -- this is a pure read projection, always fetched
+fresh from `beemacs-api-plan'. `RET' opens the task's linked change doc
+(when resolved) and, when a honeybee is currently working the task,
+reports its live session.
+\\{beemacs-plan-mode-map}"
+  (setq tabulated-list-format [("ID" 30 t) ("Status" 16 t)
+                                ("Weight" 8 t) ("Deps" 30 t)
+                                ("Claim" 20 t)])
+  (setq tabulated-list-sort-key (cons "ID" nil))
+  (tabulated-list-init-header))
+
+(defun beemacs-plan-refresh ()
+  "Refetch and redisplay the current `beemacs-plan-mode' buffer's tasks."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-plan-mode)
+    (user-error "Not in a beemacs-plan-mode buffer"))
+  (let* ((name beemacs-plan--submodule)
+         (data (beemacs-api-plan name))
+         (items (append (alist-get 'Items (alist-get 'plan data)) nil)))
+    (setq beemacs-plan--items
+          (mapcar (lambda (it) (cons (alist-get 'ID it) it)) items))
+    (setq tabulated-list-entries (beemacs-render-plan-rows items))
+    (tabulated-list-print t)))
+
+(defun beemacs-plan--doc-file (item)
+  "Return ITEM's docs/-relative doc file path, or nil when unresolved.
+
+Prefers `DocHref' (`/submodule/<name>/doc/<rel>', only ever set when the
+doc actually resolves to a real file -- see `resolveDocHref'), stripping
+everything up to and including the final \"/doc/\" segment to recover
+REL; falls back to the raw `Doc' design-doc-convention field (which may
+name a doc that does not yet exist) only when no `DocHref' was resolved."
+  (let ((href (alist-get 'DocHref item))
+        (doc (alist-get 'Doc item)))
+    (cond
+     ((and (stringp href) (string-match "/doc/\\(.+\\)\\'" href))
+      (match-string 1 href))
+     ((and (stringp doc) (not (string-empty-p doc))) doc)
+     (t nil))))
+
+(defun beemacs-plan-open-at-point ()
+  "Open the task at point's change doc, and report its live session.
+
+Fetches and shows the doc via `beemacs-api-doc' (mirroring
+`beemacs-docs-open-at-point') when the row's `DocHref'/`Doc' resolves to
+one; when the task is currently `Running' (a honeybee session actively
+holds it -- the same claim-freshness union the dashboard/sessions views
+use), also reports the live `SessionHref' so the session can be found
+even though a dedicated session-transcript buffer is not yet wired
+in (see `beemacs-session-stream'). Never touches `PLAN.md'."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-plan-mode)
+    (user-error "Not in a beemacs-plan-mode buffer"))
+  (let* ((id (tabulated-list-get-id)))
+    (unless id
+      (user-error "No task at point"))
+    (let* ((item (alist-get id beemacs-plan--items nil nil #'equal))
+           (name beemacs-plan--submodule)
+           (doc-file (and item (beemacs-plan--doc-file item)))
+           (running (and item (beemacs-render--json-true-p (alist-get 'Running item))))
+           (session-href (and item (alist-get 'SessionHref item))))
+      (when doc-file
+        (let* ((data (beemacs-api-doc name doc-file))
+               (buf (get-buffer-create (format "*beemacs-doc: %s/%s*" name doc-file))))
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert (or (alist-get 'body data) ""))
+              (goto-char (point-min)))
+            (view-mode 1)
+            (setq buffer-read-only t))
+          (pop-to-buffer buf)))
+      (when (and running (stringp session-href) (not (string-empty-p session-href)))
+        (message "Task %s is live -- session: %s" id session-href))
+      (unless (or doc-file running)
+        (message "Task %s has no linked doc and no live session" id)))))
+
+(defvar beemacs-plan-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map "g" #'beemacs-plan-refresh)
+    (define-key map (kbd "RET") #'beemacs-plan-open-at-point)
+    map)
+  "Keymap for `beemacs-plan-mode'.")
+
+;;;###autoload
+(defun beemacs-plan-view (name)
+  "Browse submodule NAME's live PLAN.md tasks: id/status/weight/deps/claim.
+
+Mirrors the beehived web UI's plan view (`GET /submodule/{name}/plan'),
+sourced from `beemacs-api-plan' (the `beehive:beemacs-json-api' plan.json
+endpoint) -- the exact same claim/running state and doc links the plan
+page and the runner's own task selection use. `g' re-fetches live; `RET'
+on a row opens that task's linked change doc and, when a honeybee is
+actively working it, reports its live session. Never writes `PLAN.md'."
+  (interactive "sSubmodule name: ")
+  (let* ((data (beemacs-api-plan name))
+         (items (append (alist-get 'Items (alist-get 'plan data)) nil))
+         (buf (get-buffer-create (format "*beemacs-plan: %s*" name))))
+    (with-current-buffer buf
+      (beemacs-plan-mode)
+      (setq beemacs-plan--submodule name)
+      (setq beemacs-plan--items
+            (mapcar (lambda (it) (cons (alist-get 'ID it) it)) items))
+      (setq tabulated-list-entries (beemacs-render-plan-rows items))
+      (tabulated-list-print t))
+    (pop-to-buffer buf)))
+
 ;;; Swarm dashboard
 
 (define-derived-mode beemacs-dashboard-mode tabulated-list-mode "Beemacs-Dashboard"
@@ -329,33 +456,16 @@ erroring, so the hub's navigation section below is always reachable."
     (insert "  [S] Secrets    [g] Refresh\n")
     (goto-char (point-min))))
 
-(defun beemacs-submodule-view--plan-body (plan)
-  "Render PLAN (a `plan.json'-shaped `plan' alist) as plain lines."
-  (mapconcat
-   (lambda (item)
-     (format "%-30s [%s] weight=%s deps=%s"
-             (or (alist-get 'ID item) "")
-             (or (alist-get 'Status item) "")
-             (or (alist-get 'Weight item) 0)
-             (mapconcat #'identity (append (alist-get 'Deps item) nil) ",")))
-   (append (alist-get 'Items plan) nil)
-   "\n"))
-
 (defun beemacs-submodule-view-plan ()
-  "Show the submodule's PLAN.md tasks (mirrors `GET /submodule/{name}/plan')."
+  "Show the submodule's PLAN.md tasks (mirrors `GET /submodule/{name}/plan').
+
+Drills into the navigable `beemacs-plan-mode' buffer (`beemacs-plan-
+view'): one row per task with its id/status/weight/deps/unified claim
+state, `RET' opening the task's linked change doc + live session."
   (interactive)
   (unless (derived-mode-p 'beemacs-submodule-view-mode)
     (user-error "Not in a beemacs-submodule-view-mode buffer"))
-  (let* ((name beemacs-submodule-view--name)
-         (data (beemacs-api-plan name))
-         (buf (get-buffer-create (format "*beemacs-plan: %s*" name))))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (beemacs-submodule-view--plan-body (alist-get 'plan data)))
-        (goto-char (point-min)))
-      (special-mode))
-    (pop-to-buffer buf)))
+  (beemacs-plan-view beemacs-submodule-view--name))
 
 (defun beemacs-submodule-view-roi ()
   "Show the submodule's raw ROI.md content (mirrors `GET /roi/{name}')."

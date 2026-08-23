@@ -320,15 +320,24 @@ jsonapi.go): every JSON handler reports a failure as
              (beemacs-test--mock-call 200 "{\"global\":[],\"submodules\":[]}")))
     (should (null (beemacs-api-secrets-for "beemacs")))))
 
-(ert-deftest beemacs-test-submodule-view-plan-body-renders-tasks ()
-  "`beemacs-submodule-view--plan-body' renders each task as one line."
-  (let ((plan '((Items . [((ID . "foo") (Status . "TODO") (Weight . 4) (Deps . ["bar"]))
-                          ((ID . "bar") (Status . "DONE") (Weight . 2) (Deps . []))]))))
-    (let ((out (beemacs-submodule-view--plan-body plan)))
-      (should (string-match-p "foo" out))
-      (should (string-match-p "\\[TODO\\]" out))
-      (should (string-match-p "bar" out))
-      (should (string-match-p "\\[DONE\\]" out)))))
+(ert-deftest beemacs-test-render-plan-rows ()
+  "`beemacs-render-plan-rows' builds one tabulated row per task."
+  (let ((items [((ID . "foo") (Status . "TODO") (Weight . 4) (Deps . ["bar"])
+                 (Session . "") (Active . :json-false) (Stale . :json-false))
+                ((ID . "bar") (Status . "DONE") (Weight . 2) (Deps . [])
+                 (Session . "sess-1") (Active . t) (Stale . :json-false))]))
+    (should (equal (beemacs-render-plan-rows items)
+                   '(("foo" ["foo" "TODO" "4" "bar" ""])
+                     ("bar" ["bar" "DONE" "2" "" "active sess-1"]))))))
+
+(ert-deftest beemacs-test-render-claim-state-stale ()
+  "`beemacs-render--claim-state' labels a past-TTL claim \"stale <session>\"."
+  (should (equal (beemacs-render--claim-state
+                   '((Session . "sess-2") (Active . :json-false) (Stale . t)))
+                 "stale sess-2"))
+  (should (equal (beemacs-render--claim-state
+                   '((Session . "") (Active . :json-false) (Stale . :json-false)))
+                 "")))
 
 (ert-deftest beemacs-test-submodule-view-refresh-shows-summary ()
   "`beemacs-submodule-view' populates its buffer with summary + nav lines."
@@ -421,7 +430,7 @@ jsonapi.go): every JSON handler reports a failure as
         (kill-buffer "*beemacs-submodule: beemacs*")))))
 
 (ert-deftest beemacs-test-submodule-view-plan-opens-plan-buffer ()
-  "RET on [p] fetches plan.json and renders it in a dedicated buffer."
+  "RET on [p] fetches plan.json and renders it as a navigable plan buffer."
   (cl-letf (((symbol-function 'beemacs-transport--call)
              (beemacs-test--mock-call
               200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
@@ -436,10 +445,95 @@ jsonapi.go): every JSON handler reports a failure as
             (with-current-buffer "*beemacs-submodule: beemacs*"
               (beemacs-submodule-view-plan)))
           (with-current-buffer "*beemacs-plan: beemacs*"
-            (should (string-match-p "foo" (buffer-string)))
-            (should (string-match-p "\\[TODO\\]" (buffer-string)))))
+            (should (derived-mode-p 'beemacs-plan-mode))
+            (should (equal beemacs-plan--submodule "beemacs"))
+            (should (equal tabulated-list-entries
+                            '(("foo" ["foo" "TODO" "4" "" ""]))))))
       (dolist (b '("*beemacs-submodule: beemacs*" "*beemacs-plan: beemacs*"))
         (when (get-buffer b) (kill-buffer b))))))
+
+(ert-deftest beemacs-test-plan-view-populates-rows ()
+  "`beemacs-plan-view' fetches plan.json and lists each task."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil
+                       (concat "{\"name\":\"beemacs\",\"plan\":{\"Items\":"
+                               "[{\"ID\":\"foo\",\"Status\":\"TODO\","
+                               "\"Weight\":4,\"Deps\":[\"bar\"],"
+                               "\"Session\":\"\",\"Active\":false,"
+                               "\"Stale\":false}]}}")))))
+      (beemacs-plan-view "beemacs")
+      (unwind-protect
+          (with-current-buffer "*beemacs-plan: beemacs*"
+            (should (string-suffix-p "/submodule/beemacs/plan.json" seen-url))
+            (should (derived-mode-p 'beemacs-plan-mode))
+            (should (equal tabulated-list-entries
+                            '(("foo" ["foo" "TODO" "4" "bar" ""])))))
+        (when (get-buffer "*beemacs-plan: beemacs*")
+          (kill-buffer "*beemacs-plan: beemacs*"))))))
+
+(ert-deftest beemacs-test-plan-refresh-refetches ()
+  "`beemacs-plan-refresh' re-fetches and redisplays entries."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"name\":\"beemacs\",\"plan\":{\"Items\":[]}}")))
+    (beemacs-plan-view "beemacs"))
+  (unwind-protect
+      (with-current-buffer "*beemacs-plan: beemacs*"
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--mock-call
+                    200 (concat "{\"name\":\"beemacs\",\"plan\":{\"Items\":"
+                                "[{\"ID\":\"baz\",\"Status\":\"DONE\","
+                                "\"Weight\":1,\"Deps\":[]}]}}"))))
+          (beemacs-plan-refresh))
+        (should (equal tabulated-list-entries
+                        '(("baz" ["baz" "DONE" "1" "" ""])))))
+    (when (get-buffer "*beemacs-plan: beemacs*")
+      (kill-buffer "*beemacs-plan: beemacs*"))))
+
+(ert-deftest beemacs-test-plan-open-at-point-opens-doc ()
+  "RET in `beemacs-plan-mode' opens the row's linked change doc."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"name\":\"beemacs\",\"plan\":{\"Items\":"
+                          "[{\"ID\":\"foo\",\"Status\":\"NEEDS-REVIEW\","
+                          "\"Weight\":4,\"Deps\":[],"
+                          "\"DocHref\":\"/submodule/beemacs/doc/bee-foo-foo.md\","
+                          "\"Running\":false}]}}"))))
+    (beemacs-plan-view "beemacs"))
+  (unwind-protect
+      (progn
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--mock-call 200 "{\"body\":\"doc body text\"}")))
+          (with-current-buffer "*beemacs-plan: beemacs*"
+            (goto-char (point-min))
+            (beemacs-plan-open-at-point)))
+        (should (get-buffer "*beemacs-doc: beemacs/bee-foo-foo.md*"))
+        (with-current-buffer "*beemacs-doc: beemacs/bee-foo-foo.md*"
+          (should (string-match-p "doc body text" (buffer-string)))))
+    (dolist (b '("*beemacs-plan: beemacs*" "*beemacs-doc: beemacs/bee-foo-foo.md*"))
+      (when (get-buffer b) (kill-buffer b)))))
+
+(ert-deftest beemacs-test-plan-open-at-point-reports-live-session ()
+  "RET in `beemacs-plan-mode' messages the live session when Running."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"name\":\"beemacs\",\"plan\":{\"Items\":"
+                          "[{\"ID\":\"foo\",\"Status\":\"TODO\","
+                          "\"Weight\":4,\"Deps\":[],\"Running\":true,"
+                          "\"SessionHref\":\"/submodule/beemacs/session/bee-foo\"}]}}"))))
+    (beemacs-plan-view "beemacs"))
+  (unwind-protect
+      (let (seen-message)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq seen-message (apply #'format fmt args)))))
+          (with-current-buffer "*beemacs-plan: beemacs*"
+            (goto-char (point-min))
+            (beemacs-plan-open-at-point)))
+        (should (string-match-p "/submodule/beemacs/session/bee-foo" seen-message)))
+    (when (get-buffer "*beemacs-plan: beemacs*")
+      (kill-buffer "*beemacs-plan: beemacs*"))))
 
 (ert-deftest beemacs-test-submodule-view-roi-opens-roi-buffer ()
   "RET on [o] fetches roi.json and renders it read-only."

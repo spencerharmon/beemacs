@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  byte-compile-and-test:
+    runs-on: docker
+    container:
+      image: nixery.dev/shell/emacs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Byte-compile (warnings are errors)
+        run: |
+          emacs -Q --batch -L . \
+            --eval "(setq byte-compile-error-on-warn t)" \
+            -f batch-byte-compile beemacs.el beemacs-transport.el \
+            beemacs-api.el beemacs-render.el
+
+      - name: Run ERT test suite
+        run: |
+          emacs -Q --batch -L . -l ert -l beemacs-tests.el \
+            -f ert-run-tests-batch-and-exit

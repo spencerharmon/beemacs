@@ -16,6 +16,7 @@
 (require 'beemacs)
 (require 'beemacs-api)
 (require 'beemacs-editor)
+(require 'beemacs-pi)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -373,6 +374,115 @@ jsonapi.go): every JSON handler reports a failure as
     (with-current-buffer buf
       (beemacs-editor-close))
     (should-not (buffer-live-p buf))))
+
+;;; beemacs-pi tests
+
+(defun beemacs-test--make-fake-pi-rpc (script)
+  "Write an executable shell SCRIPT to a temp file, return its path.
+
+The stub stands in for the real `pi' RPC binary: it is invoked with
+`beemacs-pi-rpc-args' and should read/write newline-delimited JSON on
+stdin/stdout like the real RPC mode.  SCRIPT is the shell body."
+  (let ((path (make-temp-file "beemacs-fake-pi-rpc-")))
+    (with-temp-file path
+      (insert "#!/bin/sh\n")
+      (insert script))
+    (set-file-modes path #o755)
+    path))
+
+(defun beemacs-test--make-fake-pi-oneshot (stdout exit-code)
+  "Write an executable shell stub printing STDOUT and exiting EXIT-CODE.
+
+Stands in for `pi's one-shot JSON print mode invocation."
+  (let ((path (make-temp-file "beemacs-fake-pi-oneshot-")))
+    (with-temp-file path
+      (insert "#!/bin/sh\n")
+      (insert (format "printf '%%s' %s\n" (shell-quote-argument stdout)))
+      (insert (format "exit %d\n" exit-code)))
+    (set-file-modes path #o755)
+    path))
+
+(ert-deftest beemacs-test-pi-start-spawns-live-process ()
+  "`beemacs-pi-start' spawns a running process for a well-behaved pi stub."
+  (let* ((beemacs-pi-executable
+          (beemacs-test--make-fake-pi-rpc "cat >/dev/null &\nwait\n"))
+         (handle (beemacs-pi-start)))
+    (unwind-protect
+        (progn
+          (should (beemacs-pi-alive-p handle))
+          (should (beemacs-pi-health-check handle)))
+      (beemacs-pi-stop handle))))
+
+(ert-deftest beemacs-test-pi-send-receive-round-trip ()
+  "`beemacs-pi-send' writes a JSON line the stub echoes, ON-MESSAGE sees it."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat\n"))
+         (received nil)
+         (handle (beemacs-pi-start (lambda (msg) (push msg received)))))
+    (unwind-protect
+        (progn
+          (beemacs-pi-send handle '((type . "ping") (id . 1)))
+          (with-timeout (2 nil)
+            (while (null received)
+              (accept-process-output (beemacs-pi-process-proc handle) 0.1)))
+          (should received)
+          (should (equal (alist-get 'type (car received)) "ping"))
+          (should (equal (alist-get 'id (car received)) 1)))
+      (beemacs-pi-stop handle))))
+
+(ert-deftest beemacs-test-pi-stop-cleanly-shuts-down ()
+  "`beemacs-pi-stop' terminates the child; `beemacs-pi-alive-p' then nil."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (handle (beemacs-pi-start)))
+    (should (beemacs-pi-alive-p handle))
+    (beemacs-pi-stop handle)
+    (should-not (beemacs-pi-alive-p handle))))
+
+(ert-deftest beemacs-test-pi-stop-noop-on-dead-process ()
+  "`beemacs-pi-stop' is a safe no-op when the process already exited."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "exit 0\n"))
+         (handle (beemacs-pi-start)))
+    (with-timeout (2 nil)
+      (while (beemacs-pi-alive-p handle)
+        (accept-process-output nil 0.1)))
+    (should-not (beemacs-pi-alive-p handle))
+    (should-not (beemacs-pi-stop handle))))
+
+(ert-deftest beemacs-test-pi-send-signals-when-not-running ()
+  "`beemacs-pi-send' signals `beemacs-pi-error' if the process is not alive."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "exit 0\n"))
+         (handle (beemacs-pi-start)))
+    (with-timeout (2 nil)
+      (while (beemacs-pi-alive-p handle)
+        (accept-process-output nil 0.1)))
+    (should-error (beemacs-pi-send handle '((type . "ping")))
+                  :type 'beemacs-pi-error)))
+
+(ert-deftest beemacs-test-pi-start-signals-on-missing-executable ()
+  "`beemacs-pi-start' signals `beemacs-pi-error' when the executable is absent."
+  (let ((beemacs-pi-executable "/nonexistent/beemacs-fake-pi-binary-does-not-exist"))
+    (should-error (beemacs-pi-start) :type 'beemacs-pi-error)))
+
+(ert-deftest beemacs-test-pi-oneshot-parses-json-on-success ()
+  "`beemacs-pi-run-oneshot' returns parsed JSON when the stub exits 0."
+  (let ((stub (beemacs-test--make-fake-pi-oneshot "{\"reply\":\"ok\"}" 0)))
+    (let ((result (beemacs-pi-run-oneshot "hello" stub)))
+      (should (equal (alist-get 'reply result) "ok")))))
+
+(ert-deftest beemacs-test-pi-oneshot-signals-on-nonzero-exit ()
+  "`beemacs-pi-run-oneshot' signals `beemacs-pi-error' on a non-zero exit."
+  (let ((stub (beemacs-test--make-fake-pi-oneshot "boom" 1)))
+    (should-error (beemacs-pi-run-oneshot "hello" stub) :type 'beemacs-pi-error)))
+
+(ert-deftest beemacs-test-pi-oneshot-signals-on-malformed-json ()
+  "`beemacs-pi-run-oneshot' signals `beemacs-pi-error' on malformed stdout."
+  (let ((stub (beemacs-test--make-fake-pi-oneshot "not json at all {{{" 0)))
+    (should-error (beemacs-pi-run-oneshot "hello" stub) :type 'beemacs-pi-error)))
+
+(ert-deftest beemacs-test-pi-oneshot-signals-on-missing-executable ()
+  "`beemacs-pi-run-oneshot' signals `beemacs-pi-error' for a missing binary."
+  (should-error
+   (beemacs-pi-run-oneshot "hello" "/nonexistent/beemacs-fake-pi-binary-does-not-exist")
+   :type 'beemacs-pi-error))
 
 (provide 'beemacs-tests)
 

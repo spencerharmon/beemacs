@@ -40,6 +40,7 @@
 (require 'beemacs-api)
 (require 'beemacs-render)
 (require 'beemacs-editor)
+(require 'beemacs-pi)
 (require 'tabulated-list)
 (require 'diff-mode)
 

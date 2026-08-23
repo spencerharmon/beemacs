@@ -253,6 +253,166 @@ jsonapi.go): every JSON handler reports a failure as
         (should (string-suffix-p "/skills.json" seen-url))
         (should (equal (alist-get 'dances result) []))))))
 
+(ert-deftest beemacs-test-api-dance-plan-path-and-body ()
+  "`beemacs-api-dance-plan' POSTs to /api/dances/{name}/plan with no confirm
+field, and returns the decoded identity/plan payload."
+  (let (seen-url seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-url url seen-data url-request-data)
+                 (list 200 nil
+                       (concat "{\"name\":\"gc\",\"title\":\"GC\","
+                               "\"destructive\":false,\"reportOnly\":false,"
+                               "\"plan\":{\"empty\":true,\"diffs\":[]}}")))))
+      (let ((result (beemacs-api-dance-plan "gc")))
+        (should (string-suffix-p "/api/dances/gc/plan" seen-url))
+        (should (equal seen-data (encode-coding-string "" 'utf-8)))
+        (should (equal (alist-get 'name result) "gc"))
+        (should (eq (alist-get 'empty (alist-get 'plan result)) t))))))
+
+(ert-deftest beemacs-test-api-dance-apply-omits-confirm-by-default ()
+  "`beemacs-api-dance-apply' without CONFIRM POSTs no `confirm' form field."
+  (let (seen-url seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-url url seen-data url-request-data)
+                 (list 200 nil
+                       (concat "{\"confirmRequired\":true,"
+                               "\"error\":\"dance is destructive and requires "
+                               "explicit confirmation\"}")))))
+      (let ((result (beemacs-api-dance-apply "gc")))
+        (should (string-suffix-p "/api/dances/gc/apply" seen-url))
+        (should (equal seen-data (encode-coding-string "" 'utf-8)))
+        (should (eq (alist-get 'confirmRequired result) t))))))
+
+(ert-deftest beemacs-test-api-dance-apply-sends-confirm-true ()
+  "`beemacs-api-dance-apply' with a non-nil CONFIRM POSTs confirm=true."
+  (let (seen-url seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-url url seen-data url-request-data)
+                 (list 200 nil
+                       "{\"name\":\"gc\",\"result\":{\"ok\":true},\"plan\":{\"empty\":true,\"diffs\":[]}}"))))
+      (let ((result (beemacs-api-dance-apply "gc" t)))
+        (should (string-suffix-p "/api/dances/gc/apply" seen-url))
+        (should (equal seen-data (encode-coding-string "confirm=true" 'utf-8)))
+        (should (equal (alist-get 'name result) "gc"))))))
+
+(ert-deftest beemacs-test-api-dance-plan-unknown-signals-api-error ()
+  "`beemacs-api-dance-plan' on beehived's 404 unknown-dance response signals
+`beemacs-api-error' carrying the server's own detail message."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url)
+               (list 404 nil "{\"error\":\"unknown dance\"}"))))
+    (let ((err (should-error (beemacs-api-dance-plan "nope") :type 'beemacs-api-error)))
+      (should (string-match-p "unknown dance" (cadr err))))))
+
+(ert-deftest beemacs-test-dance-plan-opens-buffer-with-diff ()
+  "`beemacs-dance-plan' pops a `beemacs-dance-plan-mode' buffer rendering the
+dance's identity fields and a unified diff for each changed file."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url)
+               (list 200 nil
+                     (concat "{\"name\":\"repair-plan\",\"title\":\"Repair plan\","
+                             "\"destructive\":true,\"reportOnly\":false,"
+                             "\"plan\":{\"empty\":false,\"diffs\":"
+                             "[{\"path\":\"PLAN.md\",\"before\":\"a\\n\",\"after\":\"b\\n\"}]}}")))))
+    (unwind-protect
+        (progn
+          (beemacs-dance-plan "repair-plan")
+          (with-current-buffer "*beemacs-dance-plan: repair-plan*"
+            (should (derived-mode-p 'beemacs-dance-plan-mode))
+            (should (equal beemacs-dance-plan--name "repair-plan"))
+            (should buffer-read-only)
+            (should (string-match-p "Name: repair-plan" (buffer-string)))
+            (should (string-match-p "Destructive: yes" (buffer-string)))
+            (should (string-match-p "\\+b" (buffer-string)))))
+      (when (get-buffer "*beemacs-dance-plan: repair-plan*")
+        (kill-buffer "*beemacs-dance-plan: repair-plan*")))))
+
+(ert-deftest beemacs-test-dance-plan-empty-plan-renders-no-changes ()
+  "`beemacs-dance-plan' renders \"(no changes)\" for an empty plan."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url)
+               (list 200 nil
+                     (concat "{\"name\":\"gc\",\"title\":\"GC\","
+                             "\"destructive\":false,\"reportOnly\":false,"
+                             "\"plan\":{\"empty\":true,\"diffs\":[]}}")))))
+    (unwind-protect
+        (progn
+          (beemacs-dance-plan "gc")
+          (with-current-buffer "*beemacs-dance-plan: gc*"
+            (should (string-match-p "(no changes)" (buffer-string)))))
+      (when (get-buffer "*beemacs-dance-plan: gc*")
+        (kill-buffer "*beemacs-dance-plan: gc*")))))
+
+(ert-deftest beemacs-test-dance-apply-reports-applied-result ()
+  "`beemacs-dance-apply' on a non-destructive dance applies immediately (no
+confirmation prompt) and reports the server's real result via `message'."
+  (let (messages)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (list 200 nil
+                       "{\"name\":\"gc\",\"result\":{\"removed\":3},\"plan\":{\"empty\":true,\"diffs\":[]}}")))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (beemacs-dance-apply "gc")
+      (should (cl-some (lambda (m) (string-match-p "gc applied" m)) messages)))))
+
+(ert-deftest beemacs-test-dance-apply-confirm-required-declined-does-not-mutate ()
+  "`beemacs-dance-apply' on a destructive dance, when the user declines the
+`yes-or-no-p' confirmation, never issues a second (mutating) apply call and
+reports it was not applied."
+  (let ((call-count 0) messages)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (cl-incf call-count)
+                 (list 200 nil
+                       "{\"confirmRequired\":true,\"error\":\"dance is destructive and requires explicit confirmation\"}")))
+              ((symbol-function 'yes-or-no-p) (lambda (_prompt) nil))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (beemacs-dance-apply "repair-plan")
+      (should (= call-count 1))
+      (should (cl-some (lambda (m) (string-match-p "NOT applied" m)) messages)))))
+
+(ert-deftest beemacs-test-dance-apply-confirm-required-accepted-reapplies-with-confirm ()
+  "`beemacs-dance-apply' on a destructive dance, when the user accepts the
+`yes-or-no-p' confirmation, re-issues the apply call with confirm=true and
+reports the resulting applied outcome."
+  (let (seen-datas messages)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (push url-request-data seen-datas)
+                 (if (equal url-request-data (encode-coding-string "confirm=true" 'utf-8))
+                     (list 200 nil
+                           "{\"name\":\"repair-plan\",\"result\":{\"repaired\":true},\"plan\":{\"empty\":true,\"diffs\":[]}}")
+                   (list 200 nil
+                         "{\"confirmRequired\":true,\"error\":\"dance is destructive and requires explicit confirmation\"}"))))
+              ((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (beemacs-dance-apply "repair-plan")
+      (should (= (length seen-datas) 2))
+      (should (cl-some (lambda (m) (string-match-p "repair-plan applied" m)) messages)))))
+
+(ert-deftest beemacs-test-skills-plan-at-point-uses-row-name ()
+  "`beemacs-skills-plan-at-point' reads the dance name from the current
+tabulated-list row and delegates to `beemacs-dance-plan'."
+  (let ((entries (beemacs-render-skill-rows
+                   (vector '((Name . "gc") (Title . "GC") (Summary . "s")
+                             (Destructive . :json-false) (ReportOnly . :json-false)))))
+        seen-name)
+    (cl-letf (((symbol-function 'beemacs-dance-plan)
+               (lambda (name) (setq seen-name name))))
+      (with-temp-buffer
+        (beemacs-skills-mode)
+        (setq tabulated-list-entries entries)
+        (tabulated-list-print t)
+        (goto-char (point-min))
+        (beemacs-skills-plan-at-point)
+        (should (equal seen-name "gc"))))))
+
 (ert-deftest beemacs-test-api-stats-path ()
   "`beemacs-api-stats' hits the hive-wide stats.json endpoint (no submodule)."
   (let (seen-url)

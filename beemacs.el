@@ -37,6 +37,7 @@
 ;;; Code:
 
 (require 'beemacs-transport)
+(require 'beemacs-streaming)
 (require 'beemacs-api)
 (require 'beemacs-render)
 (require 'beemacs-editor)

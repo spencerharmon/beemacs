@@ -20,6 +20,7 @@
 (require 'beemacs-pi-chat)
 (require 'beemacs-pi-sessions)
 (require 'beemacs-pi-model)
+(require 'beemacs-streaming)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -999,6 +1000,139 @@ teardown via `beemacs-pi-stop' can be observed like the real process."
           (should-not (beemacs-pi-model-default)))
       (delete-file beemacs-pi-model-persist-file)
       (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+;; --- beemacs-streaming (SSE) tests ---
+
+(defun beemacs-test--sse-conn (&optional callback)
+  "Return a fresh `beemacs-sse-connection' with HEADERS-DONE-P already set.
+
+Skips HTTP-header stripping so tests can feed body-only SSE byte chunks
+directly, per the framing tests below.  CALLBACK defaults to a lambda
+that pushes payloads onto a list bound in the caller's `let'."
+  (beemacs-sse-connection--create
+   :callback (or callback #'ignore)
+   :headers-done-p t))
+
+(ert-deftest beemacs-test-sse-feed-single-chunk-single-event ()
+  "A single chunk containing one complete SSE frame fires the callback once."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received)))))
+    (beemacs-sse--feed conn "data: hello\n\n")
+    (should (equal received '("hello")))
+    (should (equal (beemacs-sse-connection-pending conn) ""))))
+
+(ert-deftest beemacs-test-sse-feed-multiple-events-one-chunk ()
+  "Two frames delivered in one chunk both fire the callback, in order."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received)))))
+    (beemacs-sse--feed conn "data: one\n\ndata: two\n\n")
+    (should (equal (nreverse received) '("one" "two")))))
+
+(ert-deftest beemacs-test-sse-feed-split-data-line-across-chunks ()
+  "A `data:' frame whose payload is split mid-line across two chunks is
+reassembled into a single correct callback invocation, not two, and not
+corrupted or dropped."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received)))))
+    (beemacs-sse--feed conn "data: hel")
+    (should (null received))
+    (beemacs-sse--feed conn "lo world\n\n")
+    (should (equal received '("hello world")))))
+
+(ert-deftest beemacs-test-sse-feed-split-across-blank-line-terminator ()
+  "A split that lands exactly between the data line and its terminating
+blank line still dispatches exactly once, with the frame boundary
+correctly detected only once the blank line itself has arrived."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received)))))
+    (beemacs-sse--feed conn "data: payload\n")
+    (should (null received))
+    (beemacs-sse--feed conn "\n")
+    (should (equal received '("payload")))))
+
+(ert-deftest beemacs-test-sse-feed-split-many-tiny-chunks ()
+  "A frame delivered byte-by-byte across many tiny chunks still reassembles
+into one correct callback invocation."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received))))
+         (bytes (append (string-to-list "data: chunked\n\n") nil)))
+    (dolist (b bytes)
+      (beemacs-sse--feed conn (char-to-string b)))
+    (should (equal received '("chunked")))))
+
+(ert-deftest beemacs-test-sse-feed-multiline-data-joined-with-newline ()
+  "Multiple `data:' lines within one frame are joined with a newline,
+matching the SSE multi-line-data convention."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received)))))
+    (beemacs-sse--feed conn "data: line one\ndata: line two\n\n")
+    (should (equal received '("line one\nline two")))))
+
+(ert-deftest beemacs-test-sse-feed-ignores-event-and-comment-lines ()
+  "`event:', `id:', and comment (\":\"-prefixed) lines do not themselves
+trigger a callback and do not corrupt the surrounding data payload."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received)))))
+    (beemacs-sse--feed conn ": keep-alive\nevent: message\nid: 42\ndata: real\n\n")
+    (should (equal received '("real")))))
+
+(ert-deftest beemacs-test-sse-feed-strips-http-headers-before-body ()
+  "`beemacs-sse--feed' skips the raw HTTP response header block (even when
+split across chunks) before parsing SSE frames out of the body."
+  (let* ((received nil)
+         (conn (beemacs-sse-connection--create
+                :callback (lambda (p) (push p received)))))
+    (beemacs-sse--feed conn "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n")
+    (should (null received))
+    (should-not (beemacs-sse-connection-headers-done-p conn))
+    (beemacs-sse--feed conn "\r\ndata: after-headers\n\n")
+    (should (beemacs-sse-connection-headers-done-p conn))
+    (should (equal received '("after-headers")))))
+
+(ert-deftest beemacs-test-sse-filter-noop-after-abort ()
+  "A filter built for an aborted connection drops chunks without invoking
+CALLBACK, so a race between process teardown and an in-flight chunk
+cannot fire a callback on a torn-down connection."
+  (let* ((received nil)
+         (conn (beemacs-test--sse-conn (lambda (p) (push p received))))
+         (filter (beemacs-sse--filter conn)))
+    (setf (beemacs-sse-connection-aborted-p conn) t)
+    (funcall filter 'fake-proc "data: nope\n\n")
+    (should (null received))))
+
+(ert-deftest beemacs-test-sse-connect-installs-filter-and-abort-cleans-up ()
+  "`beemacs-sse-connect' returns a connection whose process filter feeds
+`beemacs-sse--feed', and `beemacs-sse-abort' leaves no live process or
+buffer behind."
+  (let* ((received nil)
+         (fake-buffer (generate-new-buffer " *beemacs-sse-test*"))
+         (fake-proc (make-pipe-process :name "beemacs-sse-test"
+                                        :buffer fake-buffer
+                                        :noquery t
+                                        :filter #'ignore)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'url-retrieve)
+                   (lambda (_url _callback &rest _)
+                     fake-buffer)))
+          (let ((conn (beemacs-sse-connect
+                       "/events" (lambda (p) (push p received)))))
+            (should (beemacs-sse-connection-proc conn))
+            (should (process-filter (beemacs-sse-connection-proc conn)))
+            (funcall (process-filter (beemacs-sse-connection-proc conn))
+                     fake-proc "HTTP/1.1 200 OK\r\n\r\ndata: live\n\n")
+            (should (equal received '("live")))
+            (beemacs-sse-abort conn)
+            (should-not (process-live-p fake-proc))
+            (should-not (buffer-live-p fake-buffer))))
+      (when (process-live-p fake-proc) (delete-process fake-proc))
+      (when (buffer-live-p fake-buffer) (kill-buffer fake-buffer)))))
+
+(ert-deftest beemacs-test-sse-connect-signals-when-url-retrieve-fails ()
+  "`beemacs-sse-connect' signals `beemacs-sse-error' when the underlying
+request cannot even be started (`url-retrieve' returns nil)."
+  (cl-letf (((symbol-function 'url-retrieve) (lambda (&rest _) nil)))
+    (should-error (beemacs-sse-connect "/events" #'ignore)
+                  :type 'beemacs-sse-error)))
 
 (provide 'beemacs-tests)
 

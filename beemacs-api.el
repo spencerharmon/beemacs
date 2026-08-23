@@ -257,6 +257,25 @@ pattern over `beemacs-api-dashboard''s `subs' vector."
          (entry (cl-find-if (lambda (s) (equal (alist-get 'name s) name)) subs)))
     (and entry (alist-get 'keys entry))))
 
+(defun beemacs-api-secrets-set (key value &optional submodule)
+  "Set secret KEY to VALUE, in SUBMODULE's own file or globally if nil.
+
+Mirrors `POST /secrets.json' (beehived's `secretsWriteJSON', the JSON
+write-side counterpart to `secretsPost'/`submoduleSecretsPost'). Like
+those HTML write handlers, this only ever WRITES a value -- it is never
+returned by any read path. When SUBMODULE is nil or empty, the key is
+written to the active repo's own global `SECRETS.yaml.gpg'; otherwise it
+is written to that submodule's own secrets file. Returns the same
+hive-wide key-name listing `beemacs-api-secrets' returns (the server
+re-renders `secretsJSON' after the write), so callers can refresh a
+displayed listing from the response instead of issuing a second GET."
+  (beemacs-api-json-post
+   "/secrets.json"
+   `((key . ,key)
+     (value . ,value)
+     ,@(when (and submodule (not (string-empty-p submodule)))
+         `((submodule . ,submodule))))))
+
 (defun beemacs-api-skills ()
   "Return the hive-wide skills/dances registry, hygiene scan, and cache widget.
 

@@ -726,6 +726,36 @@ listing -- `GET /skills.json' takes no submodule name."
       (tabulated-list-print t))
     (pop-to-buffer buf)))
 
+;;; Swarm-maintenance ops (merge, and related hygiene/bootstrap-visibility)
+
+;;;###autoload
+(defun beemacs-merge (name branch)
+  "Merge BRANCH into submodule NAME's tracked branch: `POST /merge'.
+
+The swarm-maintenance write op -- mirrors the beehived web UI's merge
+panel (`GET /merge' read-only view, `POST /merge' the actual merge
+action). NAME and BRANCH are read interactively. This NEVER reports an
+assumed-success message: on a 2xx response it echoes that the merge was
+actually accepted by the server (only reachable once `beemacs-api-merge'
+has returned without signaling); on any failure -- git merge conflict,
+any other backend error, or a connection failure -- it signals/echoes
+the server's TRUE error text (a real \"merge conflict\", the wrapped git
+error, or the transport failure), never a generic \"something went
+wrong\". See `beemacs-api-merge' for the full request/error contract."
+  (interactive
+   (list (completing-read
+          "Submodule name: "
+          (mapcar (lambda (s) (or (alist-get 'name s) (alist-get 'Name s)))
+                   (append (beemacs-api-submodules) nil)))
+         (read-string "Branch: ")))
+  (condition-case err
+      (progn
+        (beemacs-api-merge name branch)
+        (message "beemacs-merge: %s merged into %s (accepted by beehived)"
+                 branch name))
+    (beemacs-api-error
+     (message "beemacs-merge FAILED: %s" (car (cdr err))))))
+
 (provide 'beemacs)
 
 ;;; beemacs.el ends here

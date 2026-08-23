@@ -1671,6 +1671,85 @@ SSE connection and clears the buffer-local handle, leaking no process."
       (when (get-buffer "*beemacs-stats*") (kill-buffer "*beemacs-stats*"))
       (when (get-buffer "*beemacs-stats: beemacs*")
         (kill-buffer "*beemacs-stats: beemacs*")))))
+(ert-deftest beemacs-test-transport-post-form-sets-method-and-body ()
+  "`beemacs-transport-post-form' issues a POST with a URL-encoded form body
+and the `application/x-www-form-urlencoded' content type."
+  (let (seen-method seen-data seen-headers)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (setq seen-method url-request-method
+                       seen-data url-request-data
+                       seen-headers url-request-extra-headers)
+                 (list 200 nil "ok"))))
+      (beemacs-transport-post-form "/merge" '(("name" . "beemacs") ("branch" . "bee-foo")))
+      (should (equal seen-method "POST"))
+      (should (equal seen-data (encode-coding-string "name=beemacs&branch=bee-foo" 'utf-8)))
+      (should (equal (alist-get "Content-Type" seen-headers nil nil #'equal)
+                     "application/x-www-form-urlencoded")))))
+
+(ert-deftest beemacs-test-transport-post-form-encodes-special-characters ()
+  "`beemacs-transport-post-form' URL-encodes field values needing escaping."
+  (let (seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (setq seen-data url-request-data)
+                 (list 200 nil "ok"))))
+      (beemacs-transport-post-form "/merge" '(("name" . "a b") ("branch" . "bee/foo")))
+      (should (equal seen-data
+                     (encode-coding-string "name=a%20b&branch=bee%2Ffoo" 'utf-8))))))
+
+(ert-deftest beemacs-test-api-merge-success-returns-body ()
+  "`beemacs-api-merge' returns the raw response body on a 2xx `POST /merge'."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "<div>merge panel</div>")))
+    (should (equal (beemacs-api-merge "beemacs" "bee-foo")
+                   "<div>merge panel</div>"))))
+
+(ert-deftest beemacs-test-api-merge-conflict-surfaces-true-error-text ()
+  "`beemacs-api-merge' surfaces the real plain-text `http.Error' body (e.g.
+\"merge conflict\") on a 409, never a synthesized generic message."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 409 "merge conflict")))
+    (let ((err (should-error (beemacs-api-merge "beemacs" "bee-foo")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "merge conflict" (cadr err))))))
+
+(ert-deftest beemacs-test-api-merge-server-error-surfaces-git-error-text ()
+  "A 500 `POST /merge' failure surfaces the actual wrapped git error text."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 500 "exit status 128: fatal: no such branch")))
+    (let ((err (should-error (beemacs-api-merge "beemacs" "bee-foo")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "fatal: no such branch" (cadr err))))))
+
+(ert-deftest beemacs-test-api-merge-connection-failure-signals ()
+  "A connection failure during `beemacs-api-merge' still signals
+`beemacs-api-error' (never assumed success)."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url) (signal 'beemacs-http-error (list "connection refused")))))
+    (should-error (beemacs-api-merge "beemacs" "bee-foo") :type 'beemacs-api-error)))
+
+(ert-deftest beemacs-test-merge-command-reports-true-success ()
+  "`beemacs-merge' echoes a message only after `beemacs-api-merge' actually
+succeeds (no assumed-success message on failure)."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-merge) (lambda (_n _b) "ok"))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-merge "beemacs" "bee-foo")
+      (should (string-match-p "merged into" msg)))))
+
+(ert-deftest beemacs-test-merge-command-reports-true-failure ()
+  "`beemacs-merge' echoes the TRUE backend error text on failure, never a
+generic \"done\" message."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-merge)
+               (lambda (_n _b) (signal 'beemacs-api-error '("merge conflict (/merge)"))))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-merge "beemacs" "bee-foo")
+      (should (string-match-p "FAILED" msg))
+      (should (string-match-p "merge conflict" msg)))))
 
 (provide 'beemacs-tests)
 

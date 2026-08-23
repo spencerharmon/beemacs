@@ -59,6 +59,22 @@ carries no `Beehive:' stamp."
                                  (or (alist-get 'DocTask c) "")))))
           (append commits nil)))
 
+(defun beemacs-render-skill-rows (dances)
+  "Return `tabulated-list-entries'-shaped rows from DANCES.
+
+DANCES is a vector of alists as returned under the `dances' key of
+`beemacs-api-skills', each carrying the capitalized `dancePanel' fields
+`Name'/`Title'/`Summary'/`Destructive'/`ReportOnly' (no json tags on the
+Go struct, so decoded keys are the exact capitalized field names). Each
+row is `(NAME [NAME TITLE SUMMARY])', keyed by the skill's unique NAME,
+with TITLE and SUMMARY as display columns."
+  (mapcar (lambda (d)
+            (let ((name (alist-get 'Name d)))
+              (list name (vector (or name "")
+                                  (or (alist-get 'Title d) "")
+                                  (or (alist-get 'Summary d) "")))))
+          (append dances nil)))
+
 (defun beemacs-render-diff-lines (before-text after-text)
   "Return a per-line diff between BEFORE-TEXT and AFTER-TEXT.
 

@@ -222,6 +222,28 @@ jsonapi.go): every JSON handler reports a failure as
         (should (equal (alist-get 'plan_before result) "a"))
         (should (equal (alist-get 'plan_after result) "b"))))))
 
+(ert-deftest beemacs-test-api-skills-path ()
+  "`beemacs-api-skills' hits the hive-wide skills.json endpoint (no submodule)."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"hygiene\":{},\"dances\":[],\"cache\":{}}"))))
+      (let ((result (beemacs-api-skills)))
+        (should (string-suffix-p "/skills.json" seen-url))
+        (should (equal (alist-get 'dances result) []))))))
+
+(ert-deftest beemacs-test-render-skill-rows ()
+  "The render layer builds tabulated-list rows from a skills.json-shaped payload."
+  (let ((dances (vector '((Name . "modify-roi") (Title . "Modify an ROI")
+                           (Summary . "edit intent") (Destructive . :json-false)
+                           (ReportOnly . t))
+                         '((Name . "cleanup") (Title . "Cleanup")
+                           (Summary . "clear stale state") (Destructive . t)
+                           (ReportOnly . :json-false)))))
+    (should (equal (beemacs-render-skill-rows dances)
+                   '(("modify-roi" ["modify-roi" "Modify an ROI" "edit intent"])
+                     ("cleanup" ["cleanup" "Cleanup" "clear stale state"]))))))
+
 (provide 'beemacs-tests)
 
 ;;; beemacs-tests.el ends here

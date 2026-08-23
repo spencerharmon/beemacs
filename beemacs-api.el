@@ -153,6 +153,20 @@ returned alist carries `name', `sha', `author', `date', `subject',
 builds its own response map rather than marshaling a struct."
   (beemacs-api-json-request (format "/submodule/%s/commit.json/%s" name sha)))
 
+(defun beemacs-api-skills ()
+  "Return the hive-wide skills/dances registry, hygiene scan, and cache widget.
+
+Mirrors `GET /skills.json' (beehived's `skillsJSON'), the same data the
+combined hygiene+dances page renders (`/skills' pre-rename redirects to
+`/hygiene'). The returned alist carries top-level keys `hygiene' (the
+cruft-scan result), `dances' (a vector of per-skill alists with keys
+`Name', `Title', `Summary', `Destructive', `ReportOnly' -- `dancePanel'
+has no json tags, so decoded keys are the exact capitalized Go field
+names), and `cache' (the view-cache widget). This is a hive-wide
+endpoint -- unlike the submodule-scoped `beemacs-api-docs'/
+`beemacs-api-branches'/`beemacs-api-commit', it takes no submodule NAME."
+  (beemacs-api-json-request "/skills.json"))
+
 (provide 'beemacs-api)
 
 ;;; beemacs-api.el ends here

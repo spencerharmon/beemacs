@@ -470,8 +470,56 @@ state, `RET' opening the task's linked change doc + live session."
     (user-error "Not in a beemacs-submodule-view-mode buffer"))
   (beemacs-plan-view beemacs-submodule-view--name))
 
+(defvar-local beemacs-roi-edit--name nil
+  "Submodule name this `beemacs-roi-edit-mode' buffer's ROI content edits.")
+
+(defun beemacs-roi-edit-publish ()
+  "Publish this buffer's content as submodule's new ROI.md: `C-c C-c'.
+
+Sends the entire buffer text via `beemacs-api-roi-set' to
+`POST /roi/{name}' -- beehived's sanctioned ROI publish path, which
+writes ROI.md and `publishMain's the commit server-side. Never edits
+`ROI.md' through a direct checkout write from this client; the backend
+is the single source of truth for the write + publish. Reports the
+REAL backend result: on a 2xx response, the server has actually
+accepted and published the new ROI (never an assumed-success message);
+on failure -- a bad write, a publish/git error, or a connection
+failure -- reports the server's TRUE error text via the
+`beemacs-api-error' `beemacs-api-roi-set' signals, never a generic
+\"something went wrong\"."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-roi-edit-mode)
+    (user-error "Not in a beemacs-roi-edit-mode buffer"))
+  (let ((name beemacs-roi-edit--name)
+        (body (buffer-substring-no-properties (point-min) (point-max))))
+    (condition-case err
+        (progn
+          (beemacs-api-roi-set name body)
+          (message "beemacs-roi-edit: %s ROI published (accepted by beehived)" name))
+      (beemacs-api-error
+       (message "beemacs-roi-edit FAILED: %s" (car (cdr err)))))))
+
+(defvar beemacs-roi-edit-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'beemacs-roi-edit-publish)
+    map)
+  "Keymap for `beemacs-roi-edit-mode'.")
+
+(define-derived-mode beemacs-roi-edit-mode text-mode "Beemacs-ROI-Edit"
+  "Major mode for editing and publishing a submodule's ROI.md.
+
+Opens the submodule's raw ROI.md content as ordinary editable text
+(mirrors beehived's web ROI editor, `GET /roi/{name}'); `C-c C-c'
+(`beemacs-roi-edit-publish') sends the buffer's full content through
+the sanctioned `POST /roi/{name}' publish path and reports the real
+backend result -- never a direct ROI.md checkout write.
+\\{beemacs-roi-edit-mode-map}")
+
 (defun beemacs-submodule-view-roi ()
-  "Show the submodule's raw ROI.md content (mirrors `GET /roi/{name}')."
+  "Open the submodule's raw ROI.md content for editing (mirrors `GET
+/roi/{name}'), publishing via `C-c C-c' (`beemacs-roi-edit-publish')
+through the sanctioned `POST /roi/{name}' path -- never a direct
+`ROI.md' checkout write."
   (interactive)
   (unless (derived-mode-p 'beemacs-submodule-view-mode)
     (user-error "Not in a beemacs-submodule-view-mode buffer"))
@@ -479,12 +527,12 @@ state, `RET' opening the task's linked change doc + live session."
          (data (beemacs-api-roi name))
          (buf (get-buffer-create (format "*beemacs-roi: %s*" name))))
     (with-current-buffer buf
+      (beemacs-roi-edit-mode)
+      (setq beemacs-roi-edit--name name)
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (or (alist-get 'body data) ""))
-        (goto-char (point-min)))
-      (view-mode 1)
-      (setq buffer-read-only t))
+        (goto-char (point-min))))
     (pop-to-buffer buf)))
 
 (defun beemacs-submodule-view-docs ()

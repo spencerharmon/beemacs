@@ -259,6 +259,32 @@ returned alist carries `name', `body' (the raw ROI.md text), and
 map rather than marshaling a struct."
   (beemacs-api-json-request (format "/submodule/%s/roi.json" name)))
 
+(defun beemacs-api-roi-set (name body &optional endpoint)
+  "Publish submodule NAME's ROI.md as BODY via `POST /roi/{name}'.
+
+Mirrors beehived's `roiPost' handler (`internal/web/web.go'): the
+sanctioned ROI publish path used by the web UI's ROI editor -- it writes
+BODY to the submodule's `ROI.md' on the server and immediately
+`publishMain's the commit (never a direct checkout write from this
+client). This is a plain HTML/htmx form-POST route (see
+`docs/api-contract.md''s HTML-vs-JSON split), not one of the `*.json'/
+`/api/editor/*' JSON surfaces -- so, like `beemacs-api-merge', the
+SUCCESS return value is the raw HTML response body text (the re-rendered
+`roi_editor.html' fragment), not parsed JSON; callers must not scrape it
+as structured data, only confirm a 2xx was actually received.
+
+Returns the raw response body string on success (2xx). On failure,
+signals `beemacs-api-error' carrying the server's TRUE result text (a
+plain-text `http.Error' body from a failed ROI.md write or publish),
+via `beemacs-api--handle-form-http-error' -- never an assumed success or
+a synthesized generic failure. ENDPOINT optionally overrides
+`beemacs-endpoint' for this call only."
+  (condition-case err
+      (beemacs-transport-post-form
+       (format "/roi/%s" name) `(("body" . ,body)) endpoint)
+    (beemacs-http-error
+     (beemacs-api--handle-form-http-error err (format "/roi/%s" name)))))
+
 (defun beemacs-api-secrets ()
   "Return the hive-wide secrets key-name listing (global plus per-submodule).
 

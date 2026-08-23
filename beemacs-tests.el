@@ -738,7 +738,8 @@ tabulated-list row and delegates to `beemacs-dance-plan'."
       (kill-buffer "*beemacs-plan: beemacs*"))))
 
 (ert-deftest beemacs-test-submodule-view-roi-opens-roi-buffer ()
-  "RET on [o] fetches roi.json and renders it read-only."
+  "RET on [o] fetches roi.json and renders it as editable `beemacs-roi-edit-mode'
+content (never read-only -- `C-c C-c' is the sanctioned publish path)."
   (cl-letf (((symbol-function 'beemacs-transport--call)
              (beemacs-test--mock-call
               200 "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\"}]}")))
@@ -752,9 +753,81 @@ tabulated-list row and delegates to `beemacs-dance-plan'."
               (beemacs-submodule-view-roi)))
           (with-current-buffer "*beemacs-roi: beemacs*"
             (should (string-match-p "# ROI text" (buffer-string)))
-            (should buffer-read-only)))
+            (should (derived-mode-p 'beemacs-roi-edit-mode))
+            (should (equal beemacs-roi-edit--name "beemacs"))
+            (should-not buffer-read-only)))
       (dolist (b '("*beemacs-submodule: beemacs*" "*beemacs-roi: beemacs*"))
         (when (get-buffer b) (kill-buffer b))))))
+
+(ert-deftest beemacs-test-api-roi-set-posts-body-and-returns-body ()
+  "`beemacs-api-roi-set' POSTs BODY as the `body' form field to
+`/roi/{name}' and returns the raw response body on a 2xx."
+  (let (seen-url seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-url url seen-data url-request-data)
+                 (list 200 nil "<div>roi editor</div>"))))
+      (should (equal (beemacs-api-roi-set "beemacs" "# new intent\n")
+                     "<div>roi editor</div>"))
+      (should (string-suffix-p "/roi/beemacs" seen-url))
+      (should (equal (decode-coding-string seen-data 'utf-8)
+                     "body=%23%20new%20intent%0A")))))
+
+(ert-deftest beemacs-test-api-roi-set-surfaces-true-error-text ()
+  "`beemacs-api-roi-set' surfaces the server's real `http.Error' body on
+failure, never a synthesized generic message."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 500 "permission denied")))
+    (let ((err (should-error (beemacs-api-roi-set "beemacs" "x")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "permission denied" (cadr err))))))
+
+(ert-deftest beemacs-test-roi-edit-publish-reports-true-success ()
+  "`beemacs-roi-edit-publish' (`C-c C-c') sends the whole buffer to
+`beemacs-api-roi-set' and echoes a message only after the backend
+actually accepted the publish."
+  (let (msg seen-name seen-body)
+    (unwind-protect
+        (progn
+          (with-current-buffer (get-buffer-create "*beemacs-roi: beemacs*")
+            (beemacs-roi-edit-mode)
+            (setq beemacs-roi-edit--name "beemacs")
+            (insert "# edited intent\n"))
+          (cl-letf (((symbol-function 'beemacs-api-roi-set)
+                     (lambda (name body)
+                       (setq seen-name name seen-body body)
+                       "<div>ok</div>"))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+            (with-current-buffer "*beemacs-roi: beemacs*"
+              (beemacs-roi-edit-publish)))
+          (should (equal seen-name "beemacs"))
+          (should (equal seen-body "# edited intent\n"))
+          (should (string-match-p "published" msg)))
+      (when (get-buffer "*beemacs-roi: beemacs*")
+        (kill-buffer "*beemacs-roi: beemacs*")))))
+
+(ert-deftest beemacs-test-roi-edit-publish-reports-true-failure ()
+  "`beemacs-roi-edit-publish' echoes the TRUE backend error text on
+failure, never a generic \"done\" message."
+  (let (msg)
+    (unwind-protect
+        (progn
+          (with-current-buffer (get-buffer-create "*beemacs-roi: beemacs*")
+            (beemacs-roi-edit-mode)
+            (setq beemacs-roi-edit--name "beemacs")
+            (insert "# bad intent\n"))
+          (cl-letf (((symbol-function 'beemacs-api-roi-set)
+                     (lambda (_name _body)
+                       (signal 'beemacs-api-error '("permission denied (/roi/beemacs)"))))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+            (with-current-buffer "*beemacs-roi: beemacs*"
+              (beemacs-roi-edit-publish)))
+          (should (string-match-p "FAILED" msg))
+          (should (string-match-p "permission denied" msg)))
+      (when (get-buffer "*beemacs-roi: beemacs*")
+        (kill-buffer "*beemacs-roi: beemacs*")))))
 
 (ert-deftest beemacs-test-submodule-view-secrets-opens-secrets-buffer ()
   "RET on [S] fetches secrets.json filtered to this submodule's keys."

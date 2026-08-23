@@ -41,6 +41,7 @@
 (require 'beemacs-render)
 (require 'beemacs-editor)
 (require 'beemacs-pi)
+(require 'beemacs-pi-chat)
 (require 'tabulated-list)
 (require 'diff-mode)
 

@@ -17,6 +17,7 @@
 (require 'beemacs-api)
 (require 'beemacs-editor)
 (require 'beemacs-pi)
+(require 'beemacs-pi-chat)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -483,6 +484,105 @@ Stands in for `pi's one-shot JSON print mode invocation."
   (should-error
    (beemacs-pi-run-oneshot "hello" "/nonexistent/beemacs-fake-pi-binary-does-not-exist")
    :type 'beemacs-pi-error))
+
+;;; beemacs-pi-chat tests
+
+(defun beemacs-test--make-fake-pi-rpc-events (&rest json-lines)
+  "Write a stub `pi' RPC binary emitting JSON-LINES then blocking on stdin.
+
+Each element of JSON-LINES is already a JSON-encoded string; the stub
+prints each on its own line (simulating a canned RPC event sequence) and
+then `cat's stdin to stay alive (and to let round-trip sends be observed)
+until it is stopped."
+  (beemacs-test--make-fake-pi-rpc
+   (concat (mapconcat (lambda (line) (format "printf '%%s\\n' %s"
+                                              (shell-quote-argument line)))
+                       json-lines "\n")
+           "\ncat >/dev/null\n")))
+
+(defun beemacs-test--wait-for (predicate &optional timeout)
+  "Busy-wait up to TIMEOUT (default 2) seconds until PREDICATE returns non-nil."
+  (with-timeout ((or timeout 2) nil)
+    (while (not (funcall predicate))
+      (accept-process-output nil 0.05))))
+
+(ert-deftest beemacs-test-pi-chat-renders-canned-event-sequence ()
+  "`beemacs-pi-chat-open' renders a canned turn/token/tool-call/result stream."
+  (let* ((beemacs-pi-executable
+          (beemacs-test--make-fake-pi-rpc-events
+           (json-encode '((type . "turn_start")))
+           (json-encode '((type . "token") (text . "Hello, ")))
+           (json-encode '((type . "token") (text . "world.")))
+           (json-encode '((type . "tool_call") (id . "t1") (name . "grep")
+                          (input . ((pattern . "foo")))))
+           (json-encode '((type . "tool_result") (id . "t1") (output . "no matches")))
+           (json-encode '((type . "turn_end")))))
+         (buf (beemacs-pi-chat-open "test-session")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (beemacs-test--wait-for
+             (lambda () (string-match-p "\\[tool-result\\]" (buffer-string))))
+            (should (string-match-p "Hello, world\\." (buffer-string)))
+            (should (string-match-p "\\[tool-call\\] grep" (buffer-string)))
+            (should (string-match-p "\\[tool-result\\] grep -> no matches" (buffer-string)))
+            (should-not beemacs-pi-chat--turn-active)))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-pi-chat-kill-buffer-stops-process ()
+  "Killing a `beemacs-pi-chat-mode' buffer cleanly stops its `pi' process."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (buf (beemacs-pi-chat-open "test-teardown"))
+         (handle (with-current-buffer buf beemacs-pi-chat--handle)))
+    (should (beemacs-pi-alive-p handle))
+    (let (kill-buffer-query-functions) (kill-buffer buf))
+    (beemacs-test--wait-for (lambda () (not (beemacs-pi-alive-p handle))))
+    (should-not (beemacs-pi-alive-p handle))))
+
+(ert-deftest beemacs-test-pi-chat-send-starts-prompt-when-idle ()
+  "`beemacs-pi-chat-send' sends a `prompt' message when no turn is active."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (buf (beemacs-pi-chat-open "test-prompt"))
+         (sent nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq beemacs-pi-chat--turn-active nil)
+          (cl-letf (((symbol-function 'beemacs-pi-send)
+                     (lambda (_handle request) (push request sent))))
+            (beemacs-pi-chat-send "do the thing"))
+          (should (equal (alist-get 'type (car sent)) "prompt"))
+          (should (equal (alist-get 'text (car sent)) "do the thing"))
+          (should (string-match-p "> do the thing" (buffer-string))))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-pi-chat-send-steers-when-turn-active ()
+  "`beemacs-pi-chat-send' sends a `steer' message when a turn is in flight."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (buf (beemacs-pi-chat-open "test-steer"))
+         (sent nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq beemacs-pi-chat--turn-active t)
+          (cl-letf (((symbol-function 'beemacs-pi-send)
+                     (lambda (_handle request) (push request sent))))
+            (beemacs-pi-chat-send "actually do this instead"))
+          (should (equal (alist-get 'type (car sent)) "steer"))
+          (should (string-match-p "(steer) > actually do this instead" (buffer-string))))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-pi-chat-abort-sends-abort-message ()
+  "`beemacs-pi-chat-abort' sends `{\"type\":\"abort\"}' to the pi process."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (buf (beemacs-pi-chat-open "test-abort"))
+         (sent nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (cl-letf (((symbol-function 'beemacs-pi-send)
+                     (lambda (_handle request) (push request sent))))
+            (beemacs-pi-chat-abort))
+          (should (equal (alist-get 'type (car sent)) "abort"))
+          (should (string-match-p "\\[abort requested\\]" (buffer-string))))
+      (let (kill-buffer-query-functions) (kill-buffer buf)))))
 
 (provide 'beemacs-tests)
 

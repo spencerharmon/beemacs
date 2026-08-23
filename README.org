@@ -1,0 +1,19 @@
+#+TITLE: beemacs — Emacs front-end for beehive
+#+OPTIONS: toc:2 num:nil
+
+* What is this?
+
+beemacs is an Emacs interface to a [[https://github.com/spencerharmon/beehive][beehive]] install — the coordination
+layer for an autonomous self-improvement swarm. It talks to the running
+=beehived= HTTP server and aims to be *feature-complete with the beehive
+web UI*: browsing submodules, plans/tasks, ROIs, docs, live session
+transcripts, human (=NEEDS-HUMAN=) escalation resolution, the agentic
+editor, dances, hygiene, secrets, and swarm stats — all from Emacs.
+
+Modeled on [[https://github.com/spencerharmon/cavemacs][cavemacs]] (the Emacs front-end for caveman-code): a native
+Emacs package, streaming buffers, transient menus, per-install session
+persistence.
+
+* Status
+
+Bootstrapping. The swarm builds beemacs from this README up.

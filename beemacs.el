@@ -702,11 +702,42 @@ so this renders all of them into one read-only buffer."
         (setq buffer-read-only t))
       (pop-to-buffer buf))))
 
+(defun beemacs-skills--dance-at-point ()
+  "Return the dance name at point in a `beemacs-skills-mode' buffer.
+
+Signals `user-error' if not in `beemacs-skills-mode' or no row is at
+point -- shared by the plan/apply-at-point commands below so both fail
+identically when invoked off a valid row."
+  (unless (derived-mode-p 'beemacs-skills-mode)
+    (user-error "Not in a beemacs-skills-mode buffer"))
+  (let ((row (tabulated-list-get-entry)))
+    (unless row
+      (user-error "No skill at point"))
+    (aref row 0)))
+
+(defun beemacs-skills-plan-at-point ()
+  "Plan the dance at point in a `beemacs-skills-mode' buffer.
+
+Convenience wrapper over `beemacs-dance-plan' reading the dance name
+from the current tabulated-list row instead of prompting for it."
+  (interactive)
+  (beemacs-dance-plan (beemacs-skills--dance-at-point)))
+
+(defun beemacs-skills-apply-at-point ()
+  "Apply the dance at point in a `beemacs-skills-mode' buffer.
+
+Convenience wrapper over `beemacs-dance-apply' reading the dance name
+from the current tabulated-list row instead of prompting for it."
+  (interactive)
+  (beemacs-dance-apply (beemacs-skills--dance-at-point)))
+
 (defvar beemacs-skills-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map "g" #'beemacs-skills-refresh)
     (define-key map (kbd "RET") #'beemacs-skills-open-at-point)
+    (define-key map "p" #'beemacs-skills-plan-at-point)
+    (define-key map "a" #'beemacs-skills-apply-at-point)
     map)
   "Keymap for `beemacs-skills-mode'.")
 
@@ -715,7 +746,10 @@ so this renders all of them into one read-only buffer."
   "Browse the hive-wide skills/dances registry.
 
 Unlike the submodule-scoped views above, this is a single hive-wide
-listing -- `GET /skills.json' takes no submodule name."
+listing -- `GET /skills.json' takes no submodule name. `p'/`a' on a row
+plan/apply that dance (`beemacs-skills-plan-at-point'/
+`beemacs-skills-apply-at-point'); `beemacs-dance-plan'/`beemacs-dance-apply'
+below work the same way by name, without this buffer."
   (interactive)
   (let* ((data (beemacs-api-skills))
          (buf (get-buffer-create "*beemacs-skills*")))
@@ -725,6 +759,124 @@ listing -- `GET /skills.json' takes no submodule name."
             (beemacs-render-skill-rows (alist-get 'dances data)))
       (tabulated-list-print t))
     (pop-to-buffer buf)))
+
+;;; Dance plan/apply -- deterministic maintenance actions from the skills
+;;; registry, planned (dry-run) and applied via the beehive:beemacs-json-dances-api
+;;; JSON surface (`POST /api/dances/{name}/plan' + `POST /api/dances/{name}/apply').
+
+(defvar-local beemacs-dance-plan--name nil
+  "The dance name this `beemacs-dance-plan-mode' buffer's plan describes.")
+
+(defun beemacs-dance-plan--render (data)
+  "Erase and redraw the current `beemacs-dance-plan-mode' buffer from DATA.
+
+DATA is the alist `beemacs-api-dance-plan' (or the `plan'-carrying
+payload of `beemacs-api-dance-apply') returns: `name', `title',
+`destructive', `reportOnly', and `plan' (an alist with `empty' and
+`diffs', each diff carrying `path'/`before'/`after'). Renders the
+identity fields as a header followed by one `beemacs-render-unified-diff'
+block per non-empty diff, or a plain \"(no changes)\" line when the plan
+is empty."
+  (let* ((name (alist-get 'name data))
+         (title (alist-get 'title data))
+         (destructive (beemacs-render--json-true-p (alist-get 'destructive data)))
+         (report-only (beemacs-render--json-true-p (alist-get 'reportOnly data)))
+         (plan (alist-get 'plan data))
+         (empty (beemacs-render--json-true-p (alist-get 'empty plan)))
+         (diffs (append (alist-get 'diffs plan) nil))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "Name: %s\n" name))
+    (insert (format "Title: %s\n" (or title "")))
+    (insert (format "Destructive: %s\n" (if destructive "yes" "no")))
+    (insert (format "Report-only: %s\n\n" (if report-only "yes" "no")))
+    (if (or empty (null diffs))
+        (insert "(no changes)\n")
+      (dolist (d diffs)
+        (insert (beemacs-render-unified-diff
+                 (alist-get 'before d) (alist-get 'after d)
+                 (alist-get 'path d)))
+        (insert "\n")))
+    (goto-char (point-min))))
+
+(define-derived-mode beemacs-dance-plan-mode diff-mode "Beemacs-Dance-Plan"
+  "Major mode showing one dance's deterministic dry-run plan.
+
+Mirrors the beehived web UI's dance panel dry-run (`POST
+/dances/{name}/plan'), consumed here via its JSON mirror
+`beemacs-api-dance-plan'. Derived from `diff-mode' so each proposed
+file's unified diff fontifies like the editor/branch-commit diff views.
+\\{beemacs-dance-plan-mode-map}"
+  (setq buffer-read-only t))
+
+(defun beemacs-dance-plan-refresh ()
+  "Refetch and redisplay the current `beemacs-dance-plan-mode' buffer's plan."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-dance-plan-mode)
+    (user-error "Not in a beemacs-dance-plan-mode buffer"))
+  (beemacs-dance-plan--render (beemacs-api-dance-plan beemacs-dance-plan--name)))
+
+(defun beemacs-dance-plan-apply ()
+  "Apply the dance whose plan the current buffer shows.
+
+Delegates to `beemacs-dance-apply' with this buffer's dance name, then
+refreshes this buffer's plan to reflect the post-apply state (an
+applied plan should read empty; a refused/destructive-unconfirmed apply
+leaves it unchanged, matching the fresh `plan' beehived's own apply
+response already carries)."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-dance-plan-mode)
+    (user-error "Not in a beemacs-dance-plan-mode buffer"))
+  (beemacs-dance-apply beemacs-dance-plan--name)
+  (beemacs-dance-plan-refresh))
+
+(defvar beemacs-dance-plan-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "g" #'beemacs-dance-plan-refresh)
+    (define-key map "a" #'beemacs-dance-plan-apply)
+    map)
+  "Keymap for `beemacs-dance-plan-mode'.")
+
+;;;###autoload
+(defun beemacs-dance-plan (name)
+  "Plan named dance NAME: `POST /api/dances/{name}/plan'.
+
+Read-only -- mutates nothing. Opens (or reuses) a
+`beemacs-dance-plan-mode' buffer named after NAME showing its identity
+fields (title/destructive/report-only) and, for each file the dance
+would rewrite, a unified diff of the proposed change. `g' refreshes,
+`a' applies (`beemacs-dance-plan-apply')."
+  (interactive "sDance name: ")
+  (let ((data (beemacs-api-dance-plan name))
+        (buf (get-buffer-create (format "*beemacs-dance-plan: %s*" name))))
+    (with-current-buffer buf
+      (beemacs-dance-plan-mode)
+      (setq beemacs-dance-plan--name name)
+      (beemacs-dance-plan--render data))
+    (pop-to-buffer buf)))
+
+;;;###autoload
+(defun beemacs-dance-apply (name)
+  "Apply named dance NAME: `POST /api/dances/{name}/apply'.
+
+Calls `beemacs-api-dance-apply' with no confirmation first. If the dance
+is destructive and beehived reports `confirmRequired' (no mutation
+performed), interactively prompts for confirmation with `yes-or-no-p'
+naming NAME, and -- only on an explicit \"yes\" -- re-calls with
+confirmation, actually performing the mutation. Reports the SERVER's own
+outcome via `message': the real applied result on success, or that the
+apply was declined without ever claiming a mutation happened. Never
+assumes success -- every reported outcome traces back to a real
+beehived response."
+  (interactive "sDance name: ")
+  (let ((resp (beemacs-api-dance-apply name)))
+    (if (eq (alist-get 'confirmRequired resp) t)
+        (if (yes-or-no-p (format "Dance %s is destructive -- apply it? " name))
+            (let ((confirmed (beemacs-api-dance-apply name t)))
+              (message "beemacs-dance-apply: %s applied: %S" name
+                       (alist-get 'result confirmed)))
+          (message "beemacs-dance-apply: %s NOT applied (confirmation declined)" name))
+      (message "beemacs-dance-apply: %s applied: %S" name (alist-get 'result resp)))))
 
 ;;; Swarm-maintenance ops (merge, and related hygiene/bootstrap-visibility)
 

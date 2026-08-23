@@ -129,6 +129,32 @@ the two never drift."
                                   path (error-message-string parse-err)))))))
     (beemacs-http-error (beemacs-api--handle-http-error err path))))
 
+(defun beemacs-api-json-post-form (path fields &optional endpoint)
+  "Perform a JSON-returning form POST for PATH against ENDPOINT with FIELDS.
+Return the parsed JSON response.
+
+FIELDS is an alist of (KEY . VALUE) strings encoded as
+`application/x-www-form-urlencoded' via `beemacs-transport-post-form' --
+the write-side counterpart to `beemacs-api-json-post' for a handler that
+reads its input via Go's `r.FormValue' (e.g. the dances JSON apply route,
+which reads `confirm' exactly like its HTML sibling) rather than a JSON
+request body. The RESPONSE is still expected to be JSON, unlike
+`beemacs-transport-post-form''s own HTML/htmx callers. Error handling
+(malformed 2xx JSON, a non-2xx response with a JSON `error' body, a
+non-2xx response with a non-JSON body, or a connection failure) is
+identical to `beemacs-api-json-request'/`beemacs-api-json-post' -- see
+`beemacs-api-json-request''s docstring for the full behavior; all three
+funnel through `beemacs-api--handle-http-error' so none of them drift."
+  (condition-case err
+      (let ((body (beemacs-transport-post-form path fields endpoint)))
+        (condition-case parse-err
+            (beemacs-api--parse-json body)
+          (error
+           (signal 'beemacs-api-error
+                    (list (format "malformed JSON response for %s: %s"
+                                  path (error-message-string parse-err)))))))
+    (beemacs-http-error (beemacs-api--handle-http-error err path))))
+
 (defun beemacs-api-docs (name)
   "Return the docs/ file listing for submodule NAME.
 
@@ -289,6 +315,45 @@ names), and `cache' (the view-cache widget). This is a hive-wide
 endpoint -- unlike the submodule-scoped `beemacs-api-docs'/
 `beemacs-api-branches'/`beemacs-api-commit', it takes no submodule NAME."
   (beemacs-api-json-request "/skills.json"))
+
+(defun beemacs-api-dance-plan (name)
+  "Return named dance NAME's identity plus its deterministic dry-run plan.
+
+Mirrors `POST /api/dances/{name}/plan' (beehived's `apiDancePlan', the
+JSON mirror of the HTML `/dances/{name}/plan' route -- see
+`beemacs-json-dances-api'). Both call the SAME `danceRegistry.plan' the
+HTML handler uses, so this can never drift from what the web UI's dance
+panel shows; only the response encoding differs. Mutates nothing. The
+returned alist carries `name', `title', `destructive', `reportOnly', and
+`plan' (an alist with keys `empty' and `diffs', each diff an alist with
+keys `path'/`before'/`after' -- `dancePlanJSON'/`danceDiffJSON' have
+`json' tags, so decoded keys are lower-case). An unknown NAME signals
+`beemacs-api-error' with beehived's own \"unknown dance\" detail (see
+`beemacs-api--handle-http-error')."
+  (beemacs-api-json-post-form (format "/api/dances/%s/plan" name) nil))
+
+(defun beemacs-api-dance-apply (name &optional confirm)
+  "Apply named dance NAME, returning its result plus a fresh plan.
+
+Mirrors `POST /api/dances/{name}/apply' (beehived's `apiDanceApply'),
+passing CONFIRM as the same `confirm' form value the HTML route reads
+via `r.FormValue' -- omit/nil for the normal first attempt, non-nil to
+proceed past a destructive dance's confirmation gate. Reuses the SAME
+`danceRegistry.apply' the HTML handler calls, so plan/apply can never
+drift between the two surfaces.
+
+An unknown NAME or a report-only dance signals `beemacs-api-error' (404/
+400 respectively, per beehived's invocation guards). A destructive dance
+invoked WITHOUT CONFIRM performs NO mutation: it returns 200 with
+`confirmRequired' non-nil (`t' after JSON decoding) alongside a fresh
+`plan' key -- inspect this BEFORE assuming an apply mutated anything;
+never treat a 200 response alone as proof of a completed apply. On an
+actual apply, the returned alist carries `name', `result' (the dance's
+own beehived-defined result payload), and `plan' (a fresh dry-run,
+`empty' once the apply's proposed changes have been made)."
+  (beemacs-api-json-post-form
+   (format "/api/dances/%s/apply" name)
+   (when confirm '(("confirm" . "true")))))
 
 (defun beemacs-api-stats ()
   "Return the hive-wide honeybee-performance stats (`GET /stats.json').

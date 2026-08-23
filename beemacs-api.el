@@ -271,6 +271,21 @@ endpoint -- unlike the submodule-scoped `beemacs-api-docs'/
 `beemacs-api-branches'/`beemacs-api-commit', it takes no submodule NAME."
   (beemacs-api-json-request "/skills.json"))
 
+(defun beemacs-api-stats ()
+  "Return the hive-wide honeybee-performance stats (`GET /stats.json').
+
+Mirrors beehived's `statsJSON', the same figures the web `/stats' page
+renders, sourced from the JSON contract rather than a direct Prometheus
+query or scraped HTML. The returned alist carries top-level key `subs'
+(a vector of per-submodule alists with the capitalized `subStat' fields
+`Name'/`DeliveredTasks'/`Honeybees'/`ActiveNow'/`Stranded'/
+`DeliveredPerBeePct'/`Models'/`Deliveries' -- `subStat' has no json
+tags, so decoded keys are the exact capitalized Go field names) and
+`total' (the same shape, aggregated across every submodule). This is a
+hive-wide endpoint -- like `beemacs-api-skills' and
+`beemacs-api-dashboard', it takes no submodule NAME."
+  (beemacs-api-json-request "/stats.json"))
+
 (defun beemacs-api-plan (name &optional endpoint)
   "Return the parsed plan payload for submodule NAME.
 

@@ -75,6 +75,27 @@ with TITLE and SUMMARY as display columns."
                                   (or (alist-get 'Summary d) "")))))
           (append dances nil)))
 
+(defun beemacs-render-stat-rows (subs)
+  "Return `tabulated-list-entries'-shaped rows from SUBS.
+
+SUBS is a vector of alists as returned under the `subs' key of
+`beemacs-api-stats', each carrying the capitalized `subStat' struct
+fields (`Name', `DeliveredTasks', `Honeybees', `ActiveNow', `Stranded',
+`DeliveredPerBeePct' -- no json tags on the Go struct, so decoded keys
+are the exact capitalized field names). Each row is `(NAME [NAME
+DELIVERED HONEYBEES ACTIVE STRANDED YIELD])', keyed by the submodule's
+unique NAME, with `DeliveredPerBeePct' formatted as a percentage
+string."
+  (mapcar (lambda (s)
+            (let ((name (alist-get 'Name s)))
+              (list name (vector (or name "")
+                                  (format "%s" (or (alist-get 'DeliveredTasks s) 0))
+                                  (format "%s" (or (alist-get 'Honeybees s) 0))
+                                  (format "%s" (or (alist-get 'ActiveNow s) 0))
+                                  (format "%s" (or (alist-get 'Stranded s) 0))
+                                  (format "%.1f%%" (or (alist-get 'DeliveredPerBeePct s) 0))))))
+          (append subs nil)))
+
 (defun beemacs-render-dashboard-rows (subs)
   "Return `tabulated-list-entries'-shaped rows from SUBS.
 

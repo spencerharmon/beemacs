@@ -252,6 +252,17 @@ jsonapi.go): every JSON handler reports a failure as
         (should (string-suffix-p "/skills.json" seen-url))
         (should (equal (alist-get 'dances result) []))))))
 
+(ert-deftest beemacs-test-api-stats-path ()
+  "`beemacs-api-stats' hits the hive-wide stats.json endpoint (no submodule)."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"subs\":[],\"total\":{\"Name\":\"total\"}}"))))
+      (let ((result (beemacs-api-stats)))
+        (should (string-suffix-p "/stats.json" seen-url))
+        (should (equal (alist-get 'subs result) []))
+        (should (equal (alist-get 'Name (alist-get 'total result)) "total"))))))
+
 (ert-deftest beemacs-test-api-dashboard-path ()
   "`beemacs-api-dashboard' hits the hive-wide dashboard.json endpoint."
   (let (seen-url)
@@ -623,6 +634,16 @@ a branch name."
     (should (equal (beemacs-render-skill-rows dances)
                    '(("modify-roi" ["modify-roi" "Modify an ROI" "edit intent"])
                      ("cleanup" ["cleanup" "Cleanup" "clear stale state"]))))))
+
+(ert-deftest beemacs-test-render-stat-rows ()
+  "The render layer builds tabulated-list rows from a stats.json-shaped payload."
+  (let ((subs (vector '((Name . "beemacs") (DeliveredTasks . 5) (Honeybees . 10)
+                        (ActiveNow . 1) (Stranded . 0) (DeliveredPerBeePct . 50.0))
+                       '((Name . "beehive") (DeliveredTasks . 2) (Honeybees . 8)
+                         (ActiveNow . 0) (Stranded . 1) (DeliveredPerBeePct . 25.0)))))
+    (should (equal (beemacs-render-stat-rows subs)
+                   '(("beemacs" ["beemacs" "5" "10" "1" "0" "50.0%"])
+                     ("beehive" ["beehive" "2" "8" "0" "1" "25.0%"]))))))
 
 (ert-deftest beemacs-test-transport-post-sets-method-and-body ()
   "`beemacs-transport-post' issues a POST with a JSON body and content type."
@@ -1528,6 +1549,69 @@ SSE connection and clears the buffer-local handle, leaking no process."
                  (beemacs-sse-connection-proc beemacs-session-view--conn))))
     (let (kill-buffer-query-functions) (kill-buffer buf))
     (should-not (process-live-p proc))))
+
+(ert-deftest beemacs-test-stats-view-populates-rows ()
+  "`beemacs-stats-view' fetches stats.json and lists each submodule."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil
+                       (concat "{\"subs\":[{\"Name\":\"beemacs\",\"DeliveredTasks\":5,"
+                               "\"Honeybees\":10,\"ActiveNow\":1,\"Stranded\":0,"
+                               "\"DeliveredPerBeePct\":50.0}],"
+                               "\"total\":{\"Name\":\"total\",\"DeliveredTasks\":5}}")))))
+      (beemacs-stats-view)
+      (unwind-protect
+          (with-current-buffer "*beemacs-stats*"
+            (should (string-suffix-p "/stats.json" seen-url))
+            (should (derived-mode-p 'beemacs-stats-mode))
+            (should (equal tabulated-list-entries
+                            '(("beemacs" ["beemacs" "5" "10" "1" "0" "50.0%"]))))
+            (should (equal (alist-get 'Name beemacs-stats--total) "total")))
+        (when (get-buffer "*beemacs-stats*")
+          (kill-buffer "*beemacs-stats*"))))))
+
+(ert-deftest beemacs-test-stats-view-refresh-refetches ()
+  "`beemacs-stats-refresh' re-fetches and redisplays entries."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{\"subs\":[],\"total\":{}}")))
+    (beemacs-stats-view))
+  (unwind-protect
+      (with-current-buffer "*beemacs-stats*"
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--mock-call
+                    200 (concat "{\"subs\":[{\"Name\":\"beehive\",\"DeliveredTasks\":3,"
+                                "\"Honeybees\":4,\"ActiveNow\":1,\"Stranded\":2,"
+                                "\"DeliveredPerBeePct\":75.0}],\"total\":{}}"))))
+          (beemacs-stats-refresh))
+        (should (equal tabulated-list-entries
+                        '(("beehive" ["beehive" "3" "4" "1" "2" "75.0%"])))))
+    (when (get-buffer "*beemacs-stats*")
+      (kill-buffer "*beemacs-stats*"))))
+
+(ert-deftest beemacs-test-stats-view-open-at-point-shows-model-breakdown ()
+  "RET in `beemacs-stats-mode' opens a read-only per-model breakdown buffer."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"subs\":[{\"Name\":\"beemacs\",\"DeliveredTasks\":5,"
+                          "\"Honeybees\":10,\"ActiveNow\":1,\"Stranded\":0,"
+                          "\"DeliveredPerBeePct\":50.0,"
+                          "\"Models\":[{\"Model\":\"opus\",\"DeliveredTasks\":5,"
+                          "\"Honeybees\":10,\"DeliveredPerBeePct\":50.0}]}],"
+                          "\"total\":{}}"))))
+    (beemacs-stats-view)
+    (unwind-protect
+        (progn
+          (with-current-buffer "*beemacs-stats*"
+            (goto-char (point-min))
+            (beemacs-stats-open-at-point))
+          (with-current-buffer "*beemacs-stats: beemacs*"
+            (should (string-match-p "Name: beemacs" (buffer-string)))
+            (should (string-match-p "opus" (buffer-string)))
+            (should buffer-read-only)))
+      (when (get-buffer "*beemacs-stats*") (kill-buffer "*beemacs-stats*"))
+      (when (get-buffer "*beemacs-stats: beemacs*")
+        (kill-buffer "*beemacs-stats: beemacs*")))))
 
 (provide 'beemacs-tests)
 

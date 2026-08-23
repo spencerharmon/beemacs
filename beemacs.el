@@ -47,6 +47,7 @@
 (require 'beemacs-pi-sessions)
 (require 'beemacs-pi-model)
 (require 'beemacs-session)
+(require 'beemacs-stats)
 (require 'tabulated-list)
 (require 'diff-mode)
 

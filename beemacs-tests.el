@@ -136,6 +136,18 @@ jsonapi.go): every JSON handler reports a failure as
                   (vector '((name . "beemacs")) '((name . "beehive"))))
                  '("beemacs" "beehive"))))
 
+(ert-deftest beemacs-test-render-dashboard-rows ()
+  "The render layer builds tabulated-list rows from a dashboard.json-shaped payload."
+  (let ((subs (vector '((Name . "beemacs") (State . "idle") (Stamp . "abc")
+                        (Pending . 2) (Human . 0) (Env . "blue")
+                        (Working . t) (Bees . 1))
+                       '((Name . "beehive") (State . "idle") (Stamp . "def")
+                         (Pending . 0) (Human . 1) (Env . "") (Working . :json-false)
+                         (Bees . 0)))))
+    (should (equal (beemacs-render-dashboard-rows subs)
+                   '(("beemacs" ["beemacs" "idle" "2" "0" "blue" "yes" "1"])
+                     ("beehive" ["beehive" "idle" "0" "1" "" "no" "0"]))))))
+
 (ert-deftest beemacs-test-render-doc-rows ()
   "The render layer builds tabulated-list rows from a docs.json-shaped payload."
   (let ((docs (vector '((Path . "bee-x-x.md") (Name . "bee-x-x.md") (Dir . "") (Href . "/h1"))
@@ -351,6 +363,61 @@ jsonapi.go): every JSON handler reports a failure as
             (should (string-match-p "\\[S\\] Secrets" text))))
       (when (get-buffer "*beemacs-submodule: ghost*")
         (kill-buffer "*beemacs-submodule: ghost*")))))
+
+(ert-deftest beemacs-test-dashboard-populates-rows ()
+  "`beemacs-dashboard' fetches dashboard.json and lists each submodule."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil
+                       (concat "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\","
+                               "\"Stamp\":\"abc\",\"Pending\":2,\"Human\":0,"
+                               "\"Env\":\"blue\",\"Working\":false,\"Bees\":1}]}")))))
+      (beemacs-dashboard)
+      (unwind-protect
+          (with-current-buffer "*beemacs-dashboard*"
+            (should (string-suffix-p "/dashboard.json" seen-url))
+            (should (derived-mode-p 'beemacs-dashboard-mode))
+            (should (equal tabulated-list-entries
+                            '(("beemacs" ["beemacs" "idle" "2" "0" "blue" "no" "1"])))))
+        (when (get-buffer "*beemacs-dashboard*")
+          (kill-buffer "*beemacs-dashboard*"))))))
+
+(ert-deftest beemacs-test-dashboard-refresh-refetches ()
+  "`beemacs-dashboard-refresh' re-fetches and redisplays entries."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{\"subs\":[]}")))
+    (beemacs-dashboard))
+  (unwind-protect
+      (with-current-buffer "*beemacs-dashboard*"
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--mock-call
+                    200 (concat "{\"subs\":[{\"Name\":\"beehive\",\"State\":\"busy\","
+                                "\"Stamp\":\"z\",\"Pending\":1,\"Human\":1,"
+                                "\"Env\":\"green\",\"Working\":true,\"Bees\":3}]}"))))
+          (beemacs-dashboard-refresh))
+        (should (equal tabulated-list-entries
+                        '(("beehive" ["beehive" "busy" "1" "1" "green" "yes" "3"])))))
+    (when (get-buffer "*beemacs-dashboard*")
+      (kill-buffer "*beemacs-dashboard*"))))
+
+(ert-deftest beemacs-test-dashboard-open-at-point-drills-into-submodule-view ()
+  "RET in `beemacs-dashboard-mode' opens `beemacs-submodule-view' for the row."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 (concat "{\"subs\":[{\"Name\":\"beemacs\",\"State\":\"idle\","
+                          "\"Stamp\":\"abc\",\"Pending\":0,\"Human\":0,"
+                          "\"Env\":\"\",\"Working\":false,\"Bees\":0}]}"))))
+    (beemacs-dashboard)
+    (unwind-protect
+        (progn
+          (with-current-buffer "*beemacs-dashboard*"
+            (goto-char (point-min))
+            (beemacs-dashboard-open-at-point))
+          (should (get-buffer "*beemacs-submodule: beemacs*")))
+      (when (get-buffer "*beemacs-dashboard*") (kill-buffer "*beemacs-dashboard*"))
+      (when (get-buffer "*beemacs-submodule: beemacs*")
+        (kill-buffer "*beemacs-submodule: beemacs*")))))
 
 (ert-deftest beemacs-test-submodule-view-plan-opens-plan-buffer ()
   "RET on [p] fetches plan.json and renders it in a dedicated buffer."

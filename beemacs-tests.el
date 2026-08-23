@@ -130,6 +130,98 @@ jsonapi.go): every JSON handler reports a failure as
                   (vector '((name . "beemacs")) '((name . "beehive"))))
                  '("beemacs" "beehive"))))
 
+(ert-deftest beemacs-test-render-doc-rows ()
+  "The render layer builds tabulated-list rows from a docs.json-shaped payload."
+  (let ((docs (vector '((Path . "bee-x-x.md") (Name . "bee-x-x.md") (Dir . "") (Href . "/h1"))
+                       '((Path . "tasks/foo.md") (Name . "foo.md") (Dir . "tasks") (Href . "/h2")))))
+    (should (equal (beemacs-render-doc-rows docs)
+                   '(("bee-x-x.md" ["bee-x-x.md" "" "bee-x-x.md"])
+                     ("tasks/foo.md" ["foo.md" "tasks" "tasks/foo.md"]))))))
+
+(ert-deftest beemacs-test-render-branch-rows ()
+  "The render layer builds tabulated-list rows from a branches.json-shaped payload."
+  (let ((commits (vector '((SHA . "abc123") (Author . "swarm") (Date . "2026-08-23")
+                            (Subject . "did a thing") (DocTask . "beemacs-foo"))
+                          '((SHA . "def456") (Author . "swarm") (Date . "2026-08-22")
+                            (Subject . "did another thing") (DocTask . "")))))
+    (should (equal (beemacs-render-branch-rows commits)
+                   '(("abc123" ["abc123" "swarm" "2026-08-23" "did a thing" "beemacs-foo"])
+                     ("def456" ["def456" "swarm" "2026-08-22" "did another thing" ""]))))))
+
+(ert-deftest beemacs-test-render-diff-lines-pure-add ()
+  "A pure addition tags only new lines `add', existing lines `same'."
+  (should (equal (beemacs-render-diff-lines "a\nb" "a\nb\nc")
+                 '((same . "a") (same . "b") (add . "c")))))
+
+(ert-deftest beemacs-test-render-diff-lines-pure-delete ()
+  "A pure deletion tags only removed lines `del', remaining lines `same'."
+  (should (equal (beemacs-render-diff-lines "a\nb\nc" "a\nc")
+                 '((same . "a") (del . "b") (same . "c")))))
+
+(ert-deftest beemacs-test-render-diff-lines-replace ()
+  "A line replaced in place shows as a delete immediately followed by an add."
+  (should (equal (beemacs-render-diff-lines "a\nb\nc" "a\nB\nc")
+                 '((same . "a") (del . "b") (add . "B") (same . "c")))))
+
+(ert-deftest beemacs-test-render-diff-lines-identical ()
+  "Identical text yields an all-`same' diff."
+  (should (equal (beemacs-render-diff-lines "a\nb" "a\nb")
+                 '((same . "a") (same . "b")))))
+
+(ert-deftest beemacs-test-render-unified-diff-shape ()
+  "The unified diff renders a/b headers, a single hunk header, and +/- lines."
+  (let ((out (beemacs-render-unified-diff "a\nb" "a\nb\nc" "PLAN.md")))
+    (should (equal out "--- a/PLAN.md\n+++ b/PLAN.md\n@@ -1,2 +1,3 @@\n a\n b\n+c"))))
+
+(ert-deftest beemacs-test-api-docs-path ()
+  "`beemacs-api-docs' hits the docs.json endpoint for the given submodule."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"name\":\"beemacs\",\"docs\":[]}"))))
+      (let ((result (beemacs-api-docs "beemacs")))
+        (should (string-suffix-p "/submodule/beemacs/docs.json" seen-url))
+        (should (equal (alist-get 'name result) "beemacs"))))))
+
+(ert-deftest beemacs-test-api-doc-path ()
+  "`beemacs-api-doc' hits the doc.json/{file} endpoint with FILE appended."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"name\":\"beemacs\",\"file\":\"a.md\",\"body\":\"hi\"}"))))
+      (let ((result (beemacs-api-doc "beemacs" "a.md")))
+        (should (string-suffix-p "/submodule/beemacs/doc.json/a.md" seen-url))
+        (should (equal (alist-get 'body result) "hi"))))))
+
+(ert-deftest beemacs-test-api-branches-path-no-params ()
+  "`beemacs-api-branches' omits query params when OFFSET/LIMIT are nil."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"name\":\"beemacs\",\"commits\":[]}"))))
+      (beemacs-api-branches "beemacs")
+      (should (string-suffix-p "/submodule/beemacs/branches.json" seen-url)))))
+
+(ert-deftest beemacs-test-api-branches-path-with-params ()
+  "`beemacs-api-branches' passes OFFSET/LIMIT through as query params."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"name\":\"beemacs\",\"commits\":[]}"))))
+      (beemacs-api-branches "beemacs" 50 25)
+      (should (string-suffix-p "/submodule/beemacs/branches.json?offset=50&limit=25" seen-url)))))
+
+(ert-deftest beemacs-test-api-commit-path ()
+  "`beemacs-api-commit' hits the commit.json/{sha} endpoint with SHA appended."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url) (setq seen-url url)
+                 (list 200 nil "{\"sha\":\"abc\",\"plan_before\":\"a\",\"plan_after\":\"b\"}"))))
+      (let ((result (beemacs-api-commit "beemacs" "abc")))
+        (should (string-suffix-p "/submodule/beemacs/commit.json/abc" seen-url))
+        (should (equal (alist-get 'plan_before result) "a"))
+        (should (equal (alist-get 'plan_after result) "b"))))))
+
 (provide 'beemacs-tests)
 
 ;;; beemacs-tests.el ends here

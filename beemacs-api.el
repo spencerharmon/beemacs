@@ -94,6 +94,65 @@ numbers per `beemacs-api--parse-json')."
                           (format "%s (%s)" detail path)
                         (format "%s" (car data)))))))))
 
+(defun beemacs-api-docs (name)
+  "Return the docs/ file listing for submodule NAME.
+
+Mirrors `GET /submodule/{name}/docs.json' (beehived's `docsJSON', wrapping
+`docTree' -- the same recursive docs/ walk the HTML doc explorer shows).
+The returned alist carries top-level keys `name' and `docs' (a vector of
+per-entry alists with keys `Path', `Name', `Dir', `Href' -- `DocEntry' has
+no json tags, so decoded keys are the exact capitalized Go field names)."
+  (beemacs-api-json-request (format "/submodule/%s/docs.json" name)))
+
+(defun beemacs-api-doc (name file)
+  "Return one doc's raw content: submodule NAME, path FILE (docs/-relative).
+
+Mirrors `GET /submodule/{name}/doc.json/{file...}' (beehived's `docJSON').
+The returned alist carries `name', `file', and `body' (the raw file
+content as a string) -- all lower-case, since `docJSON' builds its own
+response map rather than marshaling a struct."
+  (beemacs-api-json-request (format "/submodule/%s/doc.json/%s" name file)))
+
+(defun beemacs-api--query-string (params)
+  "Build a URL query string \"?k=v&...\" from PARAMS, an alist of (KEY . VALUE).
+
+A VALUE of nil omits that pair. Returns \"\" when every value is nil."
+  (let ((pairs (delq nil
+                      (mapcar (lambda (kv)
+                                (when (cdr kv)
+                                  (format "%s=%s" (car kv)
+                                          (url-hexify-string (format "%s" (cdr kv))))))
+                              params))))
+    (if pairs (concat "?" (mapconcat #'identity pairs "&")) "")))
+
+(defun beemacs-api-branches (name &optional offset limit)
+  "Return a page of submodule NAME's commit history.
+
+Mirrors `GET /submodule/{name}/branches.json' (beehived's `branchesJSON',
+wrapping `commitGraph' plus the same DocHref/FlipSHA/FlipHref
+delivery-traceability enrichment the HTML branch view applies -- just
+flat, without HTML-only date sectioning). OFFSET/LIMIT are optional
+pagination params passed through as query parameters when non-nil (the
+server defaults to offset 0, limit 50, capped at 200 -- see `pageParams').
+The returned alist carries `name', `commits' (a vector of per-commit
+alists with keys `SHA', `Refs', `Subject', `Author', `Date', `DocTask',
+`DocPath', `DocHref', `FlipSHA', `FlipHref' -- `Commit' has no json tags,
+so decoded keys are the exact capitalized Go field names), `offset',
+`limit', and `has_next'."
+  (beemacs-api-json-request
+   (format "/submodule/%s/branches.json%s" name
+           (beemacs-api--query-string `(("offset" . ,offset) ("limit" . ,limit))))))
+
+(defun beemacs-api-commit (name sha)
+  "Return one hive commit's PLAN.md before/after content.
+
+Mirrors `GET /submodule/{name}/commit.json/{sha}' (beehived's
+`commitJSON'), scoped to submodule NAME's PLAN.md, at commit SHA. The
+returned alist carries `name', `sha', `author', `date', `subject',
+`plan_before', and `plan_after' -- all lower-case, since `commitJSON'
+builds its own response map rather than marshaling a struct."
+  (beemacs-api-json-request (format "/submodule/%s/commit.json/%s" name sha)))
+
 (provide 'beemacs-api)
 
 ;;; beemacs-api.el ends here

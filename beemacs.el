@@ -39,6 +39,8 @@
 (require 'beemacs-transport)
 (require 'beemacs-api)
 (require 'beemacs-render)
+(require 'tabulated-list)
+(require 'diff-mode)
 
 (defconst beemacs-version "0.1.0"
   "Current version of beemacs.")
@@ -47,6 +49,155 @@
   "Emacs front-end for beehive."
   :group 'tools
   :prefix "beemacs-")
+
+;;; Docs browser
+
+(defvar-local beemacs-docs--submodule nil
+  "Submodule name the current `beemacs-docs-mode' buffer is browsing.")
+
+(define-derived-mode beemacs-docs-mode tabulated-list-mode "Beemacs-Docs"
+  "Major mode listing a submodule's docs/ change-record files.
+
+Mirrors the beehived web UI's doc explorer (`GET /submodule/{name}/docs').
+\\{beemacs-docs-mode-map}"
+  (setq tabulated-list-format [("Name" 40 t) ("Dir" 20 t) ("Path" 0 nil)])
+  (setq tabulated-list-sort-key (cons "Path" nil))
+  (tabulated-list-init-header))
+
+(defun beemacs-docs-refresh ()
+  "Refetch and redisplay the current `beemacs-docs-mode' buffer's docs list."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-docs-mode)
+    (user-error "Not in a beemacs-docs-mode buffer"))
+  (let* ((name beemacs-docs--submodule)
+         (data (beemacs-api-docs name)))
+    (setq tabulated-list-entries
+          (beemacs-render-doc-rows (alist-get 'docs data)))
+    (tabulated-list-print t)))
+
+(defun beemacs-docs-open-at-point ()
+  "Open the change doc at point in a read-only buffer with its raw content."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-docs-mode)
+    (user-error "Not in a beemacs-docs-mode buffer"))
+  (let ((path (tabulated-list-get-id)))
+    (unless path
+      (user-error "No doc at point"))
+    (let* ((name beemacs-docs--submodule)
+           (data (beemacs-api-doc name path))
+           (buf (get-buffer-create (format "*beemacs-doc: %s/%s*" name path))))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (or (alist-get 'body data) ""))
+          (goto-char (point-min)))
+        (view-mode 1)
+        (setq buffer-read-only t))
+      (pop-to-buffer buf))))
+
+(defvar beemacs-docs-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map "g" #'beemacs-docs-refresh)
+    (define-key map (kbd "RET") #'beemacs-docs-open-at-point)
+    map)
+  "Keymap for `beemacs-docs-mode'.")
+
+;;;###autoload
+(defun beemacs-docs-view (name)
+  "Browse submodule NAME's docs/ change-record files."
+  (interactive "sSubmodule name: ")
+  (let* ((data (beemacs-api-docs name))
+         (buf (get-buffer-create (format "*beemacs-docs: %s*" name))))
+    (with-current-buffer buf
+      (beemacs-docs-mode)
+      (setq beemacs-docs--submodule name)
+      (setq tabulated-list-entries
+            (beemacs-render-doc-rows (alist-get 'docs data)))
+      (tabulated-list-print t))
+    (pop-to-buffer buf)))
+
+;;; Branches / commit browser
+
+(defvar-local beemacs-branches--submodule nil
+  "Submodule name the current `beemacs-branches-mode' buffer is browsing.")
+
+(define-derived-mode beemacs-branches-mode tabulated-list-mode "Beemacs-Branches"
+  "Major mode listing a submodule's commit history.
+
+Mirrors the beehived web UI's branch view (`GET /submodule/{name}/branches').
+\\{beemacs-branches-mode-map}"
+  (setq tabulated-list-format [("SHA" 12 nil) ("Author" 16 t)
+                                ("Date" 12 t) ("Subject" 50 nil)
+                                ("Task" 20 t)])
+  (setq tabulated-list-sort-key nil)
+  (tabulated-list-init-header))
+
+(defun beemacs-branches-refresh ()
+  "Refetch and redisplay the current `beemacs-branches-mode' buffer's commits."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-branches-mode)
+    (user-error "Not in a beemacs-branches-mode buffer"))
+  (let* ((name beemacs-branches--submodule)
+         (data (beemacs-api-branches name)))
+    (setq tabulated-list-entries
+          (beemacs-render-branch-rows (alist-get 'commits data)))
+    (tabulated-list-print t)))
+
+(defun beemacs-branches-open-at-point ()
+  "Open the commit at point as a `diff-mode' PLAN.md diff buffer."
+  (interactive)
+  (unless (derived-mode-p 'beemacs-branches-mode)
+    (user-error "Not in a beemacs-branches-mode buffer"))
+  (let ((sha (tabulated-list-get-id)))
+    (unless sha
+      (user-error "No commit at point"))
+    (beemacs-commit-view beemacs-branches--submodule sha)))
+
+(defvar beemacs-branches-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map "g" #'beemacs-branches-refresh)
+    (define-key map (kbd "RET") #'beemacs-branches-open-at-point)
+    map)
+  "Keymap for `beemacs-branches-mode'.")
+
+;;;###autoload
+(defun beemacs-branches-view (name)
+  "Browse submodule NAME's commit history."
+  (interactive "sSubmodule name: ")
+  (let* ((data (beemacs-api-branches name))
+         (buf (get-buffer-create (format "*beemacs-branches: %s*" name))))
+    (with-current-buffer buf
+      (beemacs-branches-mode)
+      (setq beemacs-branches--submodule name)
+      (setq tabulated-list-entries
+            (beemacs-render-branch-rows (alist-get 'commits data)))
+      (tabulated-list-print t))
+    (pop-to-buffer buf)))
+
+;;;###autoload
+(defun beemacs-commit-view (name sha)
+  "Show submodule NAME's PLAN.md diff at commit SHA in a `diff-mode' buffer.
+
+Mirrors the beehived web UI's commit view (`GET
+/submodule/{name}/commit/{sha}'), rendering the same before/after PLAN.md
+content as a unified diff computed client-side (see
+`beemacs-render-unified-diff') -- no PLAN.md is ever written."
+  (interactive "sSubmodule name: \nsCommit sha: ")
+  (let* ((data (beemacs-api-commit name sha))
+         (before (or (alist-get 'plan_before data) ""))
+         (after (or (alist-get 'plan_after data) ""))
+         (buf (get-buffer-create (format "*beemacs-commit: %s/%s*" name sha))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (beemacs-render-unified-diff before after "PLAN.md"))
+        (goto-char (point-min)))
+      (diff-mode)
+      (setq buffer-read-only t)
+      (view-mode 1))
+    (pop-to-buffer buf)))
 
 (provide 'beemacs)
 

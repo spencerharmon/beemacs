@@ -39,6 +39,7 @@
 (require 'beemacs-transport)
 (require 'beemacs-api)
 (require 'beemacs-render)
+(require 'beemacs-editor)
 (require 'tabulated-list)
 (require 'diff-mode)
 

@@ -134,6 +134,22 @@ ENDPOINT optionally overrides `beemacs-endpoint' for this call only.
 Signals `beemacs-http-error' on a non-2xx status or connection failure."
   (beemacs-transport-request path endpoint))
 
+(defun beemacs-transport-post (path json-string &optional endpoint)
+  "POST JSON-STRING to beehived PATH, returning the response body string.
+
+Sets the request method to POST, the body to the UTF-8 encoding of
+JSON-STRING, and a `Content-Type: application/json' header, then
+delegates to `beemacs-transport-request' (and, underneath it,
+`beemacs-transport--call') exactly as `beemacs-transport-get' does --
+these dynamic `url-request-*' bindings are how `url.el' distinguishes a
+POST from its default GET, so no separate low-level call path is needed.
+ENDPOINT optionally overrides `beemacs-endpoint' for this call only.
+Signals `beemacs-http-error' on a non-2xx status or connection failure."
+  (let ((url-request-method "POST")
+        (url-request-extra-headers '(("Content-Type" . "application/json")))
+        (url-request-data (encode-coding-string json-string 'utf-8)))
+    (beemacs-transport-request path endpoint)))
+
 (provide 'beemacs-transport)
 
 ;;; beemacs-transport.el ends here

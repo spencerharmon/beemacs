@@ -332,6 +332,35 @@ jsonapi.go): every JSON handler reports a failure as
              (beemacs-test--mock-call 200 "{\"global\":[],\"submodules\":[]}")))
     (should (null (beemacs-api-secrets-for "beemacs")))))
 
+(ert-deftest beemacs-test-api-secrets-set-submodule-scoped ()
+  "`beemacs-api-secrets-set' POSTs key/value/submodule to `/secrets.json'."
+  (let (seen-url seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-url url seen-data url-request-data)
+                 (list 200 nil "{\"global\":[],\"submodules\":[]}"))))
+      (beemacs-api-secrets-set "TOKEN" "s3cr3t" "beemacs")
+      (should (string-suffix-p "/secrets.json" seen-url))
+      (let ((decoded (json-parse-string (decode-coding-string seen-data 'utf-8)
+                                         :object-type 'alist)))
+        (should (equal (alist-get 'key decoded) "TOKEN"))
+        (should (equal (alist-get 'value decoded) "s3cr3t"))
+        (should (equal (alist-get 'submodule decoded) "beemacs"))))))
+
+(ert-deftest beemacs-test-api-secrets-set-global-omits-submodule ()
+  "`beemacs-api-secrets-set' omits `submodule' from the payload when nil."
+  (let (seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (setq seen-data url-request-data)
+                 (list 200 nil "{\"global\":[],\"submodules\":[]}"))))
+      (beemacs-api-secrets-set "TOKEN" "s3cr3t")
+      (let ((decoded (json-parse-string (decode-coding-string seen-data 'utf-8)
+                                         :object-type 'alist)))
+        (should (equal (alist-get 'key decoded) "TOKEN"))
+        (should (equal (alist-get 'value decoded) "s3cr3t"))
+        (should (null (alist-get 'submodule decoded)))))))
+
 (ert-deftest beemacs-test-render-plan-rows ()
   "`beemacs-render-plan-rows' builds one tabulated row per task."
   (let ((items [((ID . "foo") (Status . "TODO") (Weight . 4) (Deps . ["bar"])
@@ -584,6 +613,36 @@ jsonapi.go): every JSON handler reports a failure as
             (should (string-match-p "TOKEN" (buffer-string)))))
       (dolist (b '("*beemacs-submodule: beemacs*" "*beemacs-secrets: beemacs*"))
         (when (get-buffer b) (kill-buffer b))))))
+
+(ert-deftest beemacs-test-secrets-view-set-key-writes-and-refreshes ()
+  "`beemacs-secrets-view-set-key' POSTs the entered key/value scoped to this
+buffer's submodule, then re-renders the listing from the response."
+  (unwind-protect
+      (progn
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (beemacs-test--mock-call
+                    200 "{\"global\":[],\"submodules\":[{\"name\":\"beemacs\",\"keys\":[\"OLD\"]}]}")))
+          (beemacs-secrets-view "beemacs"))
+        (let (seen-data)
+          (cl-letf (((symbol-function 'beemacs-transport--call)
+                     (lambda (_url)
+                       (when (equal url-request-method "POST")
+                         (setq seen-data url-request-data))
+                       (list 200 nil
+                             "{\"global\":[],\"submodules\":[{\"name\":\"beemacs\",\"keys\":[\"OLD\",\"NEW\"]}]}")))
+                    ((symbol-function 'read-string) (lambda (&rest _) "NEW"))
+                    ((symbol-function 'read-passwd) (lambda (&rest _) "s3cr3t")))
+            (with-current-buffer "*beemacs-secrets: beemacs*"
+              (beemacs-secrets-view-set-key)))
+          (let ((decoded (json-parse-string (decode-coding-string seen-data 'utf-8)
+                                             :object-type 'alist)))
+            (should (equal (alist-get 'key decoded) "NEW"))
+            (should (equal (alist-get 'value decoded) "s3cr3t"))
+            (should (equal (alist-get 'submodule decoded) "beemacs"))))
+        (with-current-buffer "*beemacs-secrets: beemacs*"
+          (should (string-match-p "NEW" (buffer-string)))))
+    (when (get-buffer "*beemacs-secrets: beemacs*")
+      (kill-buffer "*beemacs-secrets: beemacs*"))))
 
 (ert-deftest beemacs-test-submodule-view-sessions-reports-pending-gap ()
   "The sessions drill-in reports the pending sessions.json listing gap via

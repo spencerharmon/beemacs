@@ -500,25 +500,91 @@ state, `RET' opening the task's linked change doc + live session."
     (user-error "Not in a beemacs-submodule-view-mode buffer"))
   (beemacs-branches-view beemacs-submodule-view--name))
 
+(defvar-local beemacs-secrets-view--name nil
+  "Submodule name this `beemacs-secrets-view-mode' buffer is scoped to, or
+nil for the hive-wide global secrets buffer.")
+
+(defun beemacs-secrets-view--render ()
+  "Fetch and render the secrets listing for the current buffer's scope.
+
+Renders `beemacs-secrets-view--name''s own keys via
+`beemacs-api-secrets-for' when scoped to a submodule, or the active
+repo's `global' key listing (from `beemacs-api-secrets') when unscoped
+(hive-wide). Never renders a value -- only the key-name listings the
+backend itself ever returns."
+  (let* ((name beemacs-secrets-view--name)
+         (keys (append (if name
+                            (beemacs-api-secrets-for name)
+                          (alist-get 'global (beemacs-api-secrets)))
+                        nil))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "Secrets for %s:\n\n" (or name "(global)")))
+    (if keys
+        (dolist (k keys) (insert (format "  %s\n" k)))
+      (insert "  (none)\n"))
+    (insert "\ng: refresh   s: set a key   q: quit\n")
+    (goto-char (point-min))
+    (setq buffer-read-only t)))
+
+(defun beemacs-secrets-view-refresh ()
+  "Refetch and re-render this secrets buffer's key listing."
+  (interactive)
+  (beemacs-secrets-view--render))
+
+(defun beemacs-secrets-view-set-key ()
+  "Prompt for a secret KEY and VALUE and write it via `POST /secrets.json'.
+
+Writes to this buffer's own scope (`beemacs-secrets-view--name''s
+submodule secrets file, or the active repo's global file when unscoped),
+mirroring the web UI's secrets panel form -- never reads back or displays
+the value, only the key name in the refreshed listing afterward."
+  (interactive)
+  (let* ((name beemacs-secrets-view--name)
+         (key (read-string (format "Secret key for %s: " (or name "(global)"))))
+         (value (read-passwd (format "Value for %s: " key))))
+    (when (string-empty-p key)
+      (user-error "Secret key must not be empty"))
+    (beemacs-api-secrets-set key value name)
+    (beemacs-secrets-view--render)
+    (message "Secret %s set for %s" key (or name "(global)"))))
+
+(defvar beemacs-secrets-view-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map "g" #'beemacs-secrets-view-refresh)
+    (define-key map "s" #'beemacs-secrets-view-set-key)
+    map)
+  "Keymap for `beemacs-secrets-view-mode'.")
+
+(define-derived-mode beemacs-secrets-view-mode special-mode "Beemacs-Secrets"
+  "Major mode for viewing and setting a submodule's (or the hive-wide
+global) secrets, mirroring the web UI's secrets panel: `GET /secrets.json'
+to list key names (never values) and `POST /secrets.json' to set one."
+  (setq buffer-read-only t))
+
+(defun beemacs-secrets-view (&optional name)
+  "Open a secrets buffer for submodule NAME, or the hive-wide global scope
+when NAME is nil.
+
+Never displays a secret value -- only the key-name listing the backend
+itself ever returns -- but supports setting a new value for a key via
+`beemacs-secrets-view-set-key' (bound to \"s\"), mirroring the web UI's
+secrets panel form."
+  (let ((buf (get-buffer-create (format "*beemacs-secrets: %s*" (or name "(global)")))))
+    (with-current-buffer buf
+      (beemacs-secrets-view-mode)
+      (setq beemacs-secrets-view--name name)
+      (beemacs-secrets-view--render))
+    (pop-to-buffer buf)))
+
 (defun beemacs-submodule-view-secrets ()
-  "Show the submodule's own secrets key-name listing (never values)."
+  "Show the submodule's own secrets key-name listing (never values), with
+`s' bound to set a new key/value for this submodule."
   (interactive)
   (unless (derived-mode-p 'beemacs-submodule-view-mode)
     (user-error "Not in a beemacs-submodule-view-mode buffer"))
-  (let* ((name beemacs-submodule-view--name)
-         (keys (append (beemacs-api-secrets-for name) nil))
-         (buf (get-buffer-create (format "*beemacs-secrets: %s*" name))))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "Secrets for %s:\n\n" name))
-        (if keys
-            (dolist (k keys) (insert (format "  %s\n" k)))
-          (insert "  (none)\n"))
-        (goto-char (point-min)))
-      (view-mode 1)
-      (setq buffer-read-only t))
-    (pop-to-buffer buf)))
+  (beemacs-secrets-view beemacs-submodule-view--name))
 
 (defun beemacs-submodule-view-sessions ()
   "Drill into the submodule's session list.

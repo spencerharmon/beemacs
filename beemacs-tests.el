@@ -18,6 +18,7 @@
 (require 'beemacs-editor)
 (require 'beemacs-pi)
 (require 'beemacs-pi-chat)
+(require 'beemacs-pi-sessions)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -583,6 +584,120 @@ until it is stopped."
           (should (equal (alist-get 'type (car sent)) "abort"))
           (should (string-match-p "\\[abort requested\\]" (buffer-string))))
       (let (kill-buffer-query-functions) (kill-buffer buf)))))
+
+;;; beemacs-pi-sessions tests
+
+(defun beemacs-test--make-fake-pi-session-list (sessions-json)
+  "Write a stub `pi' RPC binary replying `session_list' with SESSIONS-JSON.
+
+SESSIONS-JSON is an already JSON-encoded array string. The stub ignores
+its stdin request line, replies once, and then blocks (`cat's stdin) so
+teardown via `beemacs-pi-stop' can be observed like the real process."
+  (beemacs-test--make-fake-pi-rpc
+   (concat "read _line\n"
+           (format "printf '%%s\\n' %s\n"
+                   (shell-quote-argument
+                    (json-encode `((type . "session_list")
+                                   (sessions . ,sessions-json)))))
+           "cat >/dev/null\n")))
+
+(ert-deftest beemacs-test-pi-sessions-list-returns-records ()
+  "`beemacs-pi-sessions-list' round-trips a `list_sessions'/`session_list' exchange."
+  (let* ((sessions (vector '((id . "s1") (label . "root") (parent . :null) (updated . "2026-01-01"))
+                            '((id . "s2") (label . "child") (parent . "s1") (updated . "2026-01-02"))))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-session-list sessions))
+         (records (beemacs-pi-sessions-list)))
+    (should (= (length records) 2))
+    (should (equal (beemacs-pi-sessions--session-id (nth 0 records)) "s1"))
+    (should (equal (beemacs-pi-sessions--session-id (nth 1 records)) "s2"))))
+
+(ert-deftest beemacs-test-pi-sessions-list-signals-on-timeout ()
+  "`beemacs-pi-sessions-list' signals `beemacs-pi-sessions-error' if pi never replies."
+  (let* ((beemacs-pi-sessions-list-timeout 0.2)
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n")))
+    (should-error (beemacs-pi-sessions-list) :type 'beemacs-pi-sessions-error)))
+
+(ert-deftest beemacs-test-pi-sessions-build-tree-orders-depth-first ()
+  "`beemacs-pi-sessions--build-tree' walks parent-before-child, MRU siblings first."
+  (let* ((records (list '((id . "root1") (label . "r1") (parent . :null) (updated . "2026-01-01"))
+                        '((id . "c1") (label . "c1") (parent . "root1") (updated . "2026-01-03"))
+                        '((id . "c2") (label . "c2") (parent . "root1") (updated . "2026-01-05"))
+                        '((id . "root2") (label . "r2") (parent . nil) (updated . "2026-01-02"))))
+         (tree (beemacs-pi-sessions--build-tree records))
+         (ids (mapcar (lambda (dr) (beemacs-pi-sessions--session-id (cdr dr))) tree))
+         (depths (mapcar #'car tree)))
+    ;; root2 is more recently updated than root1, so it sorts first among roots.
+    (should (equal ids '("root2" "root1" "c2" "c1")))
+    (should (equal depths '(0 0 1 1)))))
+
+(ert-deftest beemacs-test-pi-sessions-build-tree-orphan-parent-becomes-root ()
+  "A record whose `parent' id is absent from RECORDS is treated as a root."
+  (let* ((records (list '((id . "s1") (label . "s1") (parent . "missing-parent") (updated . "2026-01-01"))))
+         (tree (beemacs-pi-sessions--build-tree records)))
+    (should (equal (mapcar #'car tree) '(0)))))
+
+(ert-deftest beemacs-test-pi-sessions-record-visit-persists-mru ()
+  "`beemacs-pi-sessions-record-visit' persists a most-recent-first, deduped, capped MRU."
+  (let ((beemacs-pi-sessions-persist-file (make-temp-file "beemacs-pi-sessions-mru-"))
+        (beemacs-pi-sessions-mru-limit 2))
+    (unwind-protect
+        (progn
+          (beemacs-pi-sessions-record-visit "s1")
+          (beemacs-pi-sessions-record-visit "s2")
+          (beemacs-pi-sessions-record-visit "s3")
+          (should (equal (beemacs-pi-sessions-mru) '("s3" "s2")))
+          (beemacs-pi-sessions-record-visit "s2")
+          (should (equal (beemacs-pi-sessions-mru) '("s2" "s3"))))
+      (delete-file beemacs-pi-sessions-persist-file))))
+
+(ert-deftest beemacs-test-pi-sessions-resume-sends-resume-request-and-records-mru ()
+  "`beemacs-pi-sessions-resume' opens a chat buffer, sends `resume', records MRU."
+  (let* ((beemacs-pi-sessions-persist-file (make-temp-file "beemacs-pi-sessions-mru-"))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (record '((id . "sess-42") (label . "42") (parent . :null) (updated . "2026-01-01")))
+         sent buf)
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*beemacs-pi-sessions-test*")
+          (beemacs-pi-sessions-mode)
+          (setq beemacs-pi-sessions--records (list record))
+          (setq tabulated-list-entries #'beemacs-pi-sessions--entries)
+          (tabulated-list-print t)
+          (goto-char (point-min))
+          (cl-letf (((symbol-function 'beemacs-pi-send)
+                     (lambda (_handle request) (push request sent))))
+            (setq buf (beemacs-pi-sessions-resume)))
+          (should (equal (alist-get 'type (car sent)) "resume"))
+          (should (equal (alist-get 'id (car sent)) "sess-42"))
+          (should (equal (beemacs-pi-sessions-mru) '("sess-42"))))
+      (delete-file beemacs-pi-sessions-persist-file)
+      (let (kill-buffer-query-functions)
+        (when (buffer-live-p buf) (kill-buffer buf))
+        (when (get-buffer "*beemacs-pi-sessions-test*")
+          (kill-buffer "*beemacs-pi-sessions-test*"))))))
+
+(ert-deftest beemacs-test-pi-sessions-branch-sends-branch-request ()
+  "`beemacs-pi-sessions-branch' sends a `branch' request with a `from' id."
+  (let* ((beemacs-pi-sessions-persist-file (make-temp-file "beemacs-pi-sessions-mru-"))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         (record '((id . "sess-7") (label . "7") (parent . :null) (updated . "2026-01-01")))
+         sent buf)
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*beemacs-pi-sessions-test-branch*")
+          (beemacs-pi-sessions-mode)
+          (setq beemacs-pi-sessions--records (list record))
+          (setq tabulated-list-entries #'beemacs-pi-sessions--entries)
+          (tabulated-list-print t)
+          (goto-char (point-min))
+          (cl-letf (((symbol-function 'beemacs-pi-send)
+                     (lambda (_handle request) (push request sent))))
+            (setq buf (beemacs-pi-sessions-branch)))
+          (should (equal (alist-get 'type (car sent)) "branch"))
+          (should (equal (alist-get 'from (car sent)) "sess-7")))
+      (delete-file beemacs-pi-sessions-persist-file)
+      (let (kill-buffer-query-functions)
+        (when (buffer-live-p buf) (kill-buffer buf))
+        (when (get-buffer "*beemacs-pi-sessions-test-branch*")
+          (kill-buffer "*beemacs-pi-sessions-test-branch*"))))))
 
 (provide 'beemacs-tests)
 

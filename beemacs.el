@@ -32,7 +32,7 @@
 ;;   (use-package beemacs
 ;;     :straight (beemacs :type git :host github
 ;;                         :repo "spencerharmon/beemacs")
-;;     :custom (beemacs-server-url "http://127.0.0.1:8080"))
+;;     :custom (beemacs-endpoint "http://127.0.0.1:8080"))
 
 ;;; Code:
 

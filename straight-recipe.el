@@ -7,7 +7,7 @@
 ;;     :straight (beemacs :type git :host github
 ;;                         :repo "spencerharmon/beemacs"
 ;;                         :files ("*.el"))
-;;     :custom (beemacs-server-url "http://127.0.0.1:8080"))
+;;     :custom (beemacs-endpoint "http://127.0.0.1:8080"))
 ;;
 ;; This file is consumed by `straight.el' recipe repositories / local
 ;; overrides; it is not loaded at runtime.

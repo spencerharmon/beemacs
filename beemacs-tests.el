@@ -17,6 +17,7 @@
 (require 'beemacs-api)
 (require 'beemacs-editor)
 (require 'beemacs-env)
+(require 'beemacs-persistence)
 (require 'beemacs-pi)
 (require 'beemacs-pi-chat)
 (require 'beemacs-pi-sessions)
@@ -29,6 +30,102 @@
   "Smoke test: `beemacs-version' is defined and looks like a version string."
   (should (stringp beemacs-version))
   (should (string-match-p "\\`[0-9]+\\.[0-9]+\\.[0-9]+\\'" beemacs-version)))
+
+(ert-deftest beemacs-test-persistence-read-write-file-round-trips ()
+  "`beemacs-persistence-write-file'/`beemacs-persistence-read-file' round-trip."
+  (let ((file (make-temp-file "beemacs-persistence-")))
+    (unwind-protect
+        (progn
+          (should-not (beemacs-persistence-read-file file))
+          (beemacs-persistence-write-file file '(("a" . 1) ("b" . 2)))
+          (should (equal (beemacs-persistence-read-file file)
+                          '(("a" . 1) ("b" . 2)))))
+      (delete-file file))))
+
+(ert-deftest beemacs-test-persistence-read-file-predicate-rejects-mismatch ()
+  "`beemacs-persistence-read-file' returns nil when PREDICATE rejects the value."
+  (let ((file (make-temp-file "beemacs-persistence-")))
+    (unwind-protect
+        (progn
+          (beemacs-persistence-write-file file "not-a-list")
+          (should-not (beemacs-persistence-read-file file #'listp))
+          (should (equal (beemacs-persistence-read-file file #'stringp) "not-a-list")))
+      (delete-file file))))
+
+(ert-deftest beemacs-test-persistence-endpoint-round-trips ()
+  "`beemacs-persistence-set-endpoint'/`beemacs-persistence-endpoint' round-trip
+and apply the override to `beemacs-endpoint' immediately."
+  (let ((beemacs-persistence-file (make-temp-file "beemacs-persistence-"))
+        (beemacs-endpoint beemacs-endpoint))
+    (unwind-protect
+        (progn
+          (should-not (beemacs-persistence-endpoint))
+          (beemacs-persistence-set-endpoint "http://example.com:9090")
+          (should (equal (beemacs-persistence-endpoint) "http://example.com:9090"))
+          (should (equal beemacs-endpoint "http://example.com:9090")))
+      (delete-file beemacs-persistence-file))))
+
+(ert-deftest beemacs-test-persistence-pi-executable-round-trips ()
+  "`beemacs-persistence-set-pi-executable'/`beemacs-persistence-pi-executable' round-trip."
+  (let ((beemacs-persistence-file (make-temp-file "beemacs-persistence-")))
+    (unwind-protect
+        (progn
+          (should-not (beemacs-persistence-pi-executable))
+          (beemacs-persistence-set-pi-executable "/usr/local/bin/pi")
+          (should (equal (beemacs-persistence-pi-executable) "/usr/local/bin/pi")))
+      (delete-file beemacs-persistence-file))))
+
+(ert-deftest beemacs-test-persistence-pi-default-model-round-trips ()
+  "`beemacs-persistence-set-pi-default-model'/`-pi-default-model' round-trip."
+  (let ((beemacs-persistence-file (make-temp-file "beemacs-persistence-")))
+    (unwind-protect
+        (progn
+          (should-not (beemacs-persistence-pi-default-model))
+          (beemacs-persistence-set-pi-default-model '("anthropic" . "claude-opus-4"))
+          (should (equal (beemacs-persistence-pi-default-model)
+                          '("anthropic" . "claude-opus-4"))))
+      (delete-file beemacs-persistence-file))))
+
+(ert-deftest beemacs-test-persistence-mru-records-most-recent-first-deduped-capped ()
+  "`beemacs-persistence-record-mru' moves ids to front, dedupes, and caps."
+  (let ((beemacs-persistence-file (make-temp-file "beemacs-persistence-")))
+    (unwind-protect
+        (progn
+          (should (equal (beemacs-persistence-mru 'submodule) nil))
+          (beemacs-persistence-record-mru 'submodule "sm1" 2)
+          (beemacs-persistence-record-mru 'submodule "sm2" 2)
+          (beemacs-persistence-record-mru 'submodule "sm3" 2)
+          (should (equal (beemacs-persistence-mru 'submodule) '("sm3" "sm2")))
+          (beemacs-persistence-record-mru 'submodule "sm2" 2)
+          (should (equal (beemacs-persistence-mru 'submodule) '("sm2" "sm3"))))
+      (delete-file beemacs-persistence-file))))
+
+(ert-deftest beemacs-test-persistence-mru-kinds-are-independent ()
+  "Distinct MRU KINDs (e.g. `submodule' vs `session') persist independently."
+  (let ((beemacs-persistence-file (make-temp-file "beemacs-persistence-")))
+    (unwind-protect
+        (progn
+          (beemacs-persistence-record-mru 'submodule "sm1")
+          (beemacs-persistence-record-mru 'session "sess-1")
+          (should (equal (beemacs-persistence-mru 'submodule) '("sm1")))
+          (should (equal (beemacs-persistence-mru 'session) '("sess-1"))))
+      (delete-file beemacs-persistence-file))))
+
+(ert-deftest beemacs-test-persistence-header-line-installed-for-beemacs-major-mode ()
+  "A buffer in a `beemacs-*' major mode gets the version header line installed."
+  (with-temp-buffer
+    (let ((major-mode 'beemacs-stats-mode))
+      (beemacs-persistence--maybe-install-header-line)
+      (should (equal header-line-format
+                     (format " beemacs %s" beemacs-version))))))
+
+(ert-deftest beemacs-test-persistence-header-line-not-installed-for-other-modes ()
+  "A buffer in a non-beemacs major mode is left alone."
+  (with-temp-buffer
+    (let ((major-mode 'fundamental-mode)
+          (header-line-format nil))
+      (beemacs-persistence--maybe-install-header-line)
+      (should-not header-line-format))))
 
 (ert-deftest beemacs-test-transport-url-builder ()
   "The transport URL builder joins base and path without double slashes."

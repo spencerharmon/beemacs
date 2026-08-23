@@ -46,6 +46,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'beemacs-pi)
+(require 'beemacs-persistence)
 
 (defgroup beemacs-pi-model nil
   "Provider/model selection for the pi harness."
@@ -79,19 +80,18 @@ lookup via `beemacs-pi-model-current' run with that buffer current.")
 ;;; Persistence (per-install default)
 
 (defun beemacs-pi-model--load-default ()
-  "Return the persisted default (PROVIDER . MODEL) cons, or nil if none/unreadable."
-  (when (file-readable-p beemacs-pi-model-persist-file)
-    (condition-case nil
-        (with-temp-buffer
-          (insert-file-contents beemacs-pi-model-persist-file)
-          (let ((data (read (current-buffer))))
-            (when (consp data) data)))
-      (error nil))))
+  "Return the persisted default (PROVIDER . MODEL) cons, or nil if none/unreadable.
+
+Reads via the shared `beemacs-persistence-read-file' helper rather than
+duplicating the file-read logic."
+  (beemacs-persistence-read-file beemacs-pi-model-persist-file #'consp))
 
 (defun beemacs-pi-model--save-default (provider-model)
-  "Persist PROVIDER-MODEL (a (PROVIDER . MODEL) cons) as this install's default."
-  (with-temp-file beemacs-pi-model-persist-file
-    (prin1 provider-model (current-buffer))))
+  "Persist PROVIDER-MODEL (a (PROVIDER . MODEL) cons) as this install's default.
+
+Writes via the shared `beemacs-persistence-write-file' helper rather than
+duplicating the file-write logic."
+  (beemacs-persistence-write-file beemacs-pi-model-persist-file provider-model))
 
 (defun beemacs-pi-model-default ()
   "Return the persisted per-install default (PROVIDER . MODEL) cons, or nil."

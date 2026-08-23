@@ -36,6 +36,7 @@
 
 (require 'json)
 (require 'cl-lib)
+(require 'beemacs-persistence)
 
 (defgroup beemacs-pi nil
   "pi child-process transport for beemacs."
@@ -49,6 +50,19 @@ May be a bare command name resolved via `exec-path'/`PATH', or an absolute
 path to a specific `pi' binary."
   :group 'beemacs-pi
   :type 'string)
+
+(defun beemacs-pi-set-executable (path)
+  "Persist PATH as this install's `pi' executable, and apply it immediately.
+
+Uses `beemacs-persistence-set-pi-executable' so the choice survives to
+the next session."
+  (beemacs-persistence-set-pi-executable path)
+  (setq beemacs-pi-executable path))
+
+(defun beemacs-pi--apply-persisted-executable ()
+  "Apply this install's persisted `pi' executable path, if any, at load time."
+  (when-let* ((path (beemacs-persistence-pi-executable)))
+    (setq beemacs-pi-executable path)))
 
 (defcustom beemacs-pi-rpc-args '("--rpc")
   "Extra command-line arguments passed to `pi' when starting an RPC process."
@@ -243,6 +257,8 @@ stdout is not valid JSON."
                   (list (format "pi exited with status %s: %s"
                                 exit-code (string-trim (buffer-string))))))
         (beemacs-pi--parse-json (string-trim (buffer-string)))))))
+
+(beemacs-pi--apply-persisted-executable)
 
 (provide 'beemacs-pi)
 

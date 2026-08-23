@@ -42,11 +42,9 @@
 ;; Every resume/continue/branch records the target session in a bounded
 ;; per-install MRU persisted to `beemacs-pi-sessions-persist-file' (a plain
 ;; s-expression: a list of session ids, most-recent first, capped at
-;; `beemacs-pi-sessions-mru-limit'). This is intentionally the same shape
-;; beemacs-persistence's shared MRU store is expected to standardize on
-;; (one file, one bounded list per resource kind) so that workstream can
-;; later fold this file's reads/writes into its shared store without a
-;; format migration -- until it lands, this module owns its own file.
+;; `beemacs-pi-sessions-mru-limit'), read/written via `beemacs-persistence's
+;; generic `beemacs-persistence-read-file'/`beemacs-persistence-write-file'
+;; helpers rather than duplicating that logic.
 
 ;;; Code:
 
@@ -55,6 +53,7 @@
 (require 'tabulated-list)
 (require 'beemacs-pi)
 (require 'beemacs-pi-chat)
+(require 'beemacs-persistence)
 
 (defgroup beemacs-pi-sessions nil
   "Session selector over pi's session tree."
@@ -89,19 +88,18 @@ can later absorb this file rather than requiring a format migration."
 ;;; MRU persistence
 
 (defun beemacs-pi-sessions--load-mru ()
-  "Return the persisted MRU list of session ids, or nil if none/unreadable."
-  (when (file-readable-p beemacs-pi-sessions-persist-file)
-    (condition-case nil
-        (with-temp-buffer
-          (insert-file-contents beemacs-pi-sessions-persist-file)
-          (let ((data (read (current-buffer))))
-            (when (listp data) data)))
-      (error nil))))
+  "Return the persisted MRU list of session ids, or nil if none/unreadable.
+
+Reads via the shared `beemacs-persistence-read-file' helper rather than
+duplicating the file-read logic."
+  (beemacs-persistence-read-file beemacs-pi-sessions-persist-file #'listp))
 
 (defun beemacs-pi-sessions--save-mru (ids)
-  "Persist IDS (a list of session id strings) to `beemacs-pi-sessions-persist-file'."
-  (with-temp-file beemacs-pi-sessions-persist-file
-    (prin1 ids (current-buffer))))
+  "Persist IDS (a list of session id strings) to `beemacs-pi-sessions-persist-file'.
+
+Writes via the shared `beemacs-persistence-write-file' helper rather than
+duplicating the file-write logic."
+  (beemacs-persistence-write-file beemacs-pi-sessions-persist-file ids))
 
 (defun beemacs-pi-sessions-record-visit (id)
   "Record ID as the most-recently-visited pi session in the persisted MRU.

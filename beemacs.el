@@ -41,6 +41,7 @@
 (require 'beemacs-api)
 (require 'beemacs-render)
 (require 'beemacs-editor)
+(require 'beemacs-env)
 (require 'beemacs-pi)
 (require 'beemacs-pi-chat)
 (require 'beemacs-pi-sessions)

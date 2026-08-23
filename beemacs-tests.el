@@ -16,6 +16,7 @@
 (require 'beemacs)
 (require 'beemacs-api)
 (require 'beemacs-editor)
+(require 'beemacs-env)
 (require 'beemacs-pi)
 (require 'beemacs-pi-chat)
 (require 'beemacs-pi-sessions)
@@ -1133,6 +1134,103 @@ request cannot even be started (`url-retrieve' returns nil)."
   (cl-letf (((symbol-function 'url-retrieve) (lambda (&rest _) nil)))
     (should-error (beemacs-sse-connect "/events" #'ignore)
                   :type 'beemacs-sse-error)))
+
+(defconst beemacs-test--env-panel-html
+  "<div id=\"env-panel\">
+<h1>Environments</h1>
+<p>active: <b>blue</b></p>
+<form method=\"post\" action=\"/env/deploy\">
+  <select name=\"target\"><option>blue</option><option>green</option></select>
+  <button>deploy</button>
+</form>
+</div>"
+  "A fixture mirroring beehived's `env_panel.html' with active=blue.")
+
+(defconst beemacs-test--env-panel-html-green
+  "<div id=\"env-panel\">
+<h1>Environments</h1>
+<p>active: <b>green</b></p>
+<form method=\"post\" action=\"/env/deploy\">
+  <select name=\"target\"><option>blue</option><option>green</option></select>
+  <button>deploy</button>
+</form>
+</div>"
+  "A fixture mirroring beehived's `env_panel.html' with active=green.")
+
+(ert-deftest beemacs-test-env-parse-extracts-active-and-envs ()
+  "`beemacs-env--parse' extracts the active env and the full envs list."
+  (let ((state (beemacs-env--parse beemacs-test--env-panel-html)))
+    (should (equal (alist-get 'active state) "blue"))
+    (should (equal (alist-get 'envs state) '("blue" "green")))))
+
+(ert-deftest beemacs-test-env-parse-signals-on-unrecognized-response ()
+  "`beemacs-env--parse' signals rather than guessing on an unrecognized body."
+  (should-error (beemacs-env--parse "<html>nothing here</html>")
+                :type 'user-error))
+
+(ert-deftest beemacs-test-env-state-performs-real-get ()
+  "`beemacs-env-state' issues `GET /env' and returns the parsed real state."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 beemacs-test--env-panel-html
+                                       '(("content-type" . "text/html")))))
+    (let ((state (beemacs-env-state)))
+      (should (equal (alist-get 'active state) "blue"))
+      (should (equal (alist-get 'envs state) '("blue" "green"))))))
+
+(ert-deftest beemacs-test-env-view-reports-real-state ()
+  "`beemacs-env-view' returns the real parsed server state."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 beemacs-test--env-panel-html
+                                       '(("content-type" . "text/html")))))
+    (let ((state (beemacs-env-view)))
+      (should (equal (alist-get 'active state) "blue")))))
+
+(ert-deftest beemacs-test-env-deploy-sends-target-as-query-param ()
+  "`beemacs-env-deploy' POSTs to `/env/deploy' with TARGET in the URL query."
+  (let (seen-url)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-url url)
+                 (list 200 '(("content-type" . "text/html"))
+                       beemacs-test--env-panel-html-green))))
+      (beemacs-env-deploy "green")
+      (should (string-match-p "/env/deploy\\?target=green\\'" seen-url)))))
+
+(ert-deftest beemacs-test-env-deploy-reports-real-post-deploy-active ()
+  "`beemacs-env-deploy' reports the ACTUAL post-deploy active env."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 beemacs-test--env-panel-html-green
+                                       '(("content-type" . "text/html")))))
+    (let ((state (beemacs-env-deploy "green")))
+      (should (equal (alist-get 'active state) "green")))))
+
+(ert-deftest beemacs-test-env-deploy-signals-when-deploy-did-not-take-effect ()
+  "`beemacs-env-deploy' signals a `user-error' if the reported active env
+does not match the requested TARGET, rather than reporting a false success."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 beemacs-test--env-panel-html
+                                       '(("content-type" . "text/html")))))
+    (should-error (beemacs-env-deploy "green") :type 'user-error)))
+
+(ert-deftest beemacs-test-env-deploy-signals-on-transport-failure ()
+  "`beemacs-env-deploy' propagates a real `beemacs-http-error' on failure."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 500 "internal server error")))
+    (should-error (beemacs-env-deploy "green") :type 'beemacs-http-error)))
+
+(ert-deftest beemacs-test-instruction-update-reports-real-response-body ()
+  "`beemacs-instruction-update' POSTs `/instruction/update' and returns the
+server's real response body."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{\"status\":\"ok\"}")))
+    (should (equal (beemacs-instruction-update) "{\"status\":\"ok\"}"))))
+
+(ert-deftest beemacs-test-instruction-update-signals-real-error ()
+  "`beemacs-instruction-update' surfaces the server's real error (e.g. a
+404 for a not-yet-wired route) rather than a fabricated success."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 404 "404 page not found")))
+    (should-error (beemacs-instruction-update) :type 'beemacs-http-error)))
 
 (provide 'beemacs-tests)
 

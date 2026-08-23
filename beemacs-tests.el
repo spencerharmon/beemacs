@@ -15,6 +15,7 @@
 (require 'cl-lib)
 (require 'beemacs)
 (require 'beemacs-api)
+(require 'beemacs-editor)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -221,6 +222,135 @@ jsonapi.go): every JSON handler reports a failure as
         (should (string-suffix-p "/submodule/beemacs/commit.json/abc" seen-url))
         (should (equal (alist-get 'plan_before result) "a"))
         (should (equal (alist-get 'plan_after result) "b"))))))
+
+(ert-deftest beemacs-test-transport-post-sets-method-and-body ()
+  "`beemacs-transport-post' issues a POST with a JSON body and content type."
+  (let (seen-method seen-data seen-headers)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (setq seen-method url-request-method
+                       seen-data url-request-data
+                       seen-headers url-request-extra-headers)
+                 (list 200 nil "ok"))))
+      (beemacs-transport-post "/api/editor" "{\"file\":\"a.el\"}")
+      (should (equal seen-method "POST"))
+      (should (equal seen-data (encode-coding-string "{\"file\":\"a.el\"}" 'utf-8)))
+      (should (equal (alist-get "Content-Type" seen-headers nil nil #'equal)
+                     "application/json")))))
+
+(ert-deftest beemacs-test-api-json-post-well-formed ()
+  "`beemacs-api-json-post' encodes PAYLOAD and parses a well-formed JSON reply."
+  (let (seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url)
+                 (setq seen-data url-request-data)
+                 (list 200 nil "{\"id\":\"e1\",\"file\":\"a.el\",\"state\":\"live\"}"))))
+      (let ((result (beemacs-api-json-post "/api/editor" '((file . "a.el")))))
+        (should (equal seen-data (encode-coding-string "{\"file\":\"a.el\"}" 'utf-8)))
+        (should (equal (alist-get 'id result) "e1"))
+        (should (equal (alist-get 'state result) "live"))))))
+
+(ert-deftest beemacs-test-api-json-post-http-error-surfaces-detail ()
+  "`beemacs-api-json-post' surfaces the JSON `error' field on a non-2xx reply."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 404 "{\"error\":\"no such session\"}")))
+    (let ((err (should-error (beemacs-api-json-post "/api/editor/missing/chat"
+                                                      '((message . "hi")))
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "no such session" (error-message-string err))))))
+
+(ert-deftest beemacs-test-editor-open-creates-buffer ()
+  "`beemacs-editor-open' opens a session and creates its chat buffer."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"id\":\"e1\",\"file\":\"a.el\",\"branch\":\"bee-edit-e1\",\"state\":\"live\"}")))
+    (unwind-protect
+        (let ((id (beemacs-editor-open "a.el")))
+          (should (equal id "e1"))
+          (let ((buf (beemacs-editor--find-buffer "e1")))
+            (should buf)
+            (with-current-buffer buf
+              (should (derived-mode-p 'beemacs-editor-mode))
+              (should (equal beemacs-editor--id "e1"))
+              (should (equal beemacs-editor--file "a.el"))
+              (should (equal beemacs-editor--branch "bee-edit-e1"))
+              (should (equal beemacs-editor--state "live")))))
+      (let ((buf (beemacs-editor--find-buffer "e1")))
+        (when buf (kill-buffer buf))))))
+
+(ert-deftest beemacs-test-editor-chat-appends-reply ()
+  "`beemacs-editor-chat' sends a message and appends the agent's real reply."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"id\":\"e2\",\"file\":\"a.el\",\"branch\":\"bee-edit-e2\",\"state\":\"live\"}")))
+    (beemacs-editor-open "a.el"))
+  (unwind-protect
+      (cl-letf (((symbol-function 'beemacs-transport--call)
+                 (beemacs-test--mock-call
+                  200 "{\"reply\":\"done\",\"state\":\"live\",\"merged\":false}")))
+        (let ((buf (beemacs-editor--find-buffer "e2")))
+          (with-current-buffer buf
+            (beemacs-editor-chat "make it better")
+            (should (equal beemacs-editor--state "live"))
+            (should (string-match-p "make it better" (buffer-string)))
+            (should (string-match-p "done" (buffer-string))))))
+    (let ((buf (beemacs-editor--find-buffer "e2")))
+      (when buf (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-editor-diff-renders-diff-mode-buffer ()
+  "`beemacs-editor-diff' fetches base/proposed and renders a `diff-mode' buffer."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"id\":\"e3\",\"file\":\"a.el\",\"branch\":\"bee-edit-e3\",\"state\":\"live\"}")))
+    (beemacs-editor-open "a.el"))
+  (unwind-protect
+      (cl-letf (((symbol-function 'beemacs-transport--call)
+                 (beemacs-test--mock-call
+                  200 "{\"base\":\"a\\nb\",\"proposed\":\"a\\nb\\nc\",\"state\":\"live\"}")))
+        (let ((buf (beemacs-editor--find-buffer "e3")))
+          (with-current-buffer buf
+            (beemacs-editor-diff))))
+    (let ((diff-buf (get-buffer "*beemacs-editor-diff: e3*")))
+      (should diff-buf)
+      (with-current-buffer diff-buf
+        (should (derived-mode-p 'diff-mode))
+        (should (string-match-p "\\+c" (buffer-string))))
+      (when diff-buf (kill-buffer diff-buf))
+      (let ((buf (beemacs-editor--find-buffer "e3")))
+        (when buf (kill-buffer buf))))))
+
+(ert-deftest beemacs-test-editor-merge-reports-state ()
+  "`beemacs-editor-merge' posts confirm=false by default and reports state."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"id\":\"e4\",\"file\":\"a.el\",\"branch\":\"bee-edit-e4\",\"state\":\"live\"}")))
+    (beemacs-editor-open "a.el"))
+  (unwind-protect
+      (let (seen-data)
+        (cl-letf (((symbol-function 'beemacs-transport--call)
+                   (lambda (_url)
+                     (setq seen-data url-request-data)
+                     (list 200 nil "{\"state\":\"merged\"}"))))
+          (let ((buf (beemacs-editor--find-buffer "e4")))
+            (with-current-buffer buf
+              (beemacs-editor-merge nil)
+              (should (equal beemacs-editor--state "merged"))
+              (should (equal seen-data
+                             (encode-coding-string "{\"confirm\":false}" 'utf-8))))))
+        (let ((buf (beemacs-editor--find-buffer "e4")))
+          (when buf (kill-buffer buf))))))
+
+(ert-deftest beemacs-test-editor-close-kills-buffer-locally ()
+  "`beemacs-editor-close' kills the local chat buffer with no server call."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"id\":\"e5\",\"file\":\"a.el\",\"branch\":\"bee-edit-e5\",\"state\":\"live\"}")))
+    (beemacs-editor-open "a.el"))
+  (let ((buf (beemacs-editor--find-buffer "e5")))
+    (should buf)
+    (with-current-buffer buf
+      (beemacs-editor-close))
+    (should-not (buffer-live-p buf))))
 
 (provide 'beemacs-tests)
 

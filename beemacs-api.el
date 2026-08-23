@@ -81,18 +81,52 @@ numbers per `beemacs-api--parse-json')."
            (signal 'beemacs-api-error
                     (list (format "malformed JSON response for %s: %s"
                                   path (error-message-string parse-err)))))))
-    (beemacs-http-error
-     (let* ((data (cdr err))
-            ;; `beemacs-http-error' data is either (message) for a
-            ;; connection failure, or (message (status headers body)) for
-            ;; a non-2xx HTTP response -- see beemacs-transport.el.
-            (response (nth 1 data))
-            (response-body (and (listp response) (nth 2 response)))
-            (detail (beemacs-api--error-detail response-body)))
-       (signal 'beemacs-api-error
-                (list (if detail
-                          (format "%s (%s)" detail path)
-                        (format "%s" (car data)))))))))
+    ;; `beemacs-http-error' data is either (message) for a connection
+    ;; failure, or (message (status headers body)) for a non-2xx HTTP
+    ;; response -- see beemacs-transport.el and
+    ;; `beemacs-api--handle-http-error'.
+    (beemacs-http-error (beemacs-api--handle-http-error err path))))
+
+(defun beemacs-api--handle-http-error (err path)
+  "Convert a caught `beemacs-http-error' ERR for PATH into `beemacs-api-error'.
+
+Shared by `beemacs-api-json-request' and `beemacs-api-json-post': both
+JSON-backed transport wrappers hit the same `writeJSON' failure
+convention on the server (a non-2xx response, JSON body with an `error'
+field, per `beemacs-api--error-detail'), so both convert a caught
+`beemacs-http-error' identically. See `beemacs-api-json-request' for the
+full documented behavior; this signals in place of returning."
+  (let* ((data (cdr err))
+         (response (nth 1 data))
+         (response-body (and (listp response) (nth 2 response)))
+         (detail (beemacs-api--error-detail response-body)))
+    (signal 'beemacs-api-error
+             (list (if detail
+                       (format "%s (%s)" detail path)
+                     (format "%s" (car data)))))))
+
+(defun beemacs-api-json-post (path payload &optional endpoint)
+  "Perform a JSON POST for PATH against ENDPOINT with PAYLOAD.
+Return the parsed JSON response.
+
+PAYLOAD is an elisp alist encoded with `json-encode' as the request body
+-- the write-side counterpart to `beemacs-api-json-request', used by
+every `/api/editor/*' write call (`POST /api/editor',
+`POST /api/editor/{id}/chat', `POST /api/editor/{id}/merge'). Error
+handling (malformed 2xx JSON, a non-2xx response with a JSON `error'
+body, a non-2xx response with a non-JSON body, or a connection failure)
+is identical to `beemacs-api-json-request' -- see its docstring for the
+full behavior; both funnel through `beemacs-api--handle-http-error' so
+the two never drift."
+  (condition-case err
+      (let ((body (beemacs-transport-post path (json-encode payload) endpoint)))
+        (condition-case parse-err
+            (beemacs-api--parse-json body)
+          (error
+           (signal 'beemacs-api-error
+                    (list (format "malformed JSON response for %s: %s"
+                                  path (error-message-string parse-err)))))))
+    (beemacs-http-error (beemacs-api--handle-http-error err path))))
 
 (defun beemacs-api-docs (name)
   "Return the docs/ file listing for submodule NAME.

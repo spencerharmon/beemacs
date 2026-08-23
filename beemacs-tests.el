@@ -14,6 +14,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'beemacs)
+(require 'beemacs-api)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -77,6 +78,51 @@ The mock ignores its URL argument and always returns `(STATUS HEADERS BODY)'."
   (cl-letf (((symbol-function 'beemacs-transport--call)
              (beemacs-test--mock-call 500 "boom")))
     (should-error (beemacs-transport-get "/foo") :type 'beemacs-http-error)))
+
+(ert-deftest beemacs-test-json-request-well-formed ()
+  "`beemacs-api-json-request' parses a well-formed JSON 2xx body."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call
+              200 "{\"id\":\"abc\",\"file\":\"foo.el\",\"busy\":false}")))
+    (let ((result (beemacs-api-json-request "/api/editor/abc")))
+      (should (equal (alist-get 'id result) "abc"))
+      (should (equal (alist-get 'file result) "foo.el"))
+      (should (eq (alist-get 'busy result) :json-false)))))
+
+(ert-deftest beemacs-test-json-request-malformed-signals ()
+  "`beemacs-api-json-request' signals `beemacs-api-error' on malformed JSON."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "{not valid json")))
+    (should-error (beemacs-api-json-request "/api/editor/abc")
+                  :type 'beemacs-api-error)))
+
+(ert-deftest beemacs-test-json-request-http-error-with-json-body-surfaces-detail ()
+  "A non-2xx response with a JSON `error' field surfaces that message.
+
+Mirrors beehived's `writeJSON' convention (internal/web/editor.go,
+jsonapi.go): every JSON handler reports a failure as
+`{\"error\": \"<message>\"}' alongside the non-2xx status."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 404 "{\"error\":\"no such session\"}")))
+    (let ((err (should-error (beemacs-api-json-request "/api/editor/missing")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "no such session" (error-message-string err))))))
+
+(ert-deftest beemacs-test-json-request-http-error-without-json-body ()
+  "A non-2xx response with a non-JSON body falls back to the transport message."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 500 "internal server error")))
+    (let ((err (should-error (beemacs-api-json-request "/api/editor/abc")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "non-2xx response 500" (error-message-string err))))))
+
+(ert-deftest beemacs-test-json-request-connection-failure-signals ()
+  "`beemacs-api-json-request' signals `beemacs-api-error' on connection failure."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url) (signal 'beemacs-http-error (list "connection refused")))))
+    (let ((err (should-error (beemacs-api-json-request "/api/editor/abc")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "connection refused" (error-message-string err))))))
 
 (ert-deftest beemacs-test-render-submodule-names ()
   "The render layer extracts submodule names from API-shaped data."

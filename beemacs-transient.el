@@ -23,13 +23,22 @@
 ;; `beemacs-shared-mode' are a discoverability layer on top, not a
 ;; replacement.
 ;;
-;; `transient' ships with Emacs from 28 on and is required unconditionally
-;; here; `beemacs-menu' is the only thing that needs it, so a build predating
-;; 28 loses only this file's discoverability layer, not the rest of beemacs.
+;; `transient' ships with Emacs from 28 on but this package declares
+;; `Package-Requires: ((emacs "27.1"))', and even on 28+ a mismatched/older
+;; `transient' release can be missing `transient-define-prefix' (the macro
+;; this file's menu needs). So `transient' is loaded WITH a soft failure
+;; (`require' ... NOERROR) and every entry point that depends on it degrades
+;; gracefully instead of erroring at load time: `beemacs-menu' becomes a
+;; `user-error'-signalling stub (still bound, still autoloadable, so `M-x
+;; beemacs-menu' and `C-c C-m' report a clear "transient unavailable"
+;; instead of a raw void-function/unbound-variable at load time), and
+;; `beemacs-shared-mode-map's `C-c C-m' binding is simply omitted. Every
+;; other landed beemacs command remains fully usable regardless -- this
+;; file's menu is a discoverability layer on top, never a hard dependency.
 
 ;;; Code:
 
-(require 'transient)
+(require 'transient nil t)
 (require 'beemacs-render)
 (require 'beemacs-human)
 (require 'beemacs-stats)
@@ -38,10 +47,21 @@
 (require 'beemacs-pi-model)
 (require 'beemacs-session)
 
+(declare-function beemacs-menu "beemacs-transient")
+
 (defgroup beemacs-transient nil
   "Top-level transient menu and shared cross-buffer keymap for beemacs."
   :group 'beemacs
   :prefix "beemacs-")
+
+(defconst beemacs-transient--available-p
+  (and (featurep 'transient) (fboundp 'transient-define-prefix))
+  "Non-nil when a `transient' new enough to define `beemacs-menu' is loaded.
+
+Nil either when `transient' failed to load at all, or when it loaded but
+is too old/mismatched to provide `transient-define-prefix' -- both cases
+`beemacs-menu' degrades to a `user-error' stub for (see below) instead of
+erroring at `require' time.")
 
 ;;; Shared keymap: refresh / drill-in / act / stream / abort
 
@@ -176,35 +196,47 @@ beemacs major mode; see `beemacs-shared-mode-map' and
 ;;; Top-level transient menu
 
 ;;;###autoload (autoload 'beemacs-menu "beemacs-transient" nil t)
-(transient-define-prefix beemacs-menu ()
-  "Top-level beemacs menu: every landed swarm view and pi agent surface.
+(if beemacs-transient--available-p
+    (transient-define-prefix beemacs-menu ()
+      "Top-level beemacs menu: every landed swarm view and pi agent surface.
 
 Wires existing `beemacs-*' commands only -- each suffix below just calls
 the command that already implements that surface (`beemacs-dashboard',
 `beemacs-pi-chat-open', etc.); see each command's own docstring for what
 it does. Also reachable from any beemacs buffer via `C-c C-m'
 (`beemacs-shared-mode-map')."
-  ["Swarm views"
-   ("d" "Dashboard (all submodules)" beemacs-dashboard)
-   ("s" "Submodule hub (plan/roi/docs/branches/sessions/env/secrets)"
-    beemacs-submodule-view)
-   ("p" "Plan tasks" beemacs-plan-view)
-   ("o" "Docs (change record)" beemacs-docs-view)
-   ("b" "Branches / commit history" beemacs-branches-view)
-   ("k" "Skills / dances registry" beemacs-skills-view)
-   ("t" "Swarm stats" beemacs-stats-view)
-   ("e" "Secrets (per-submodule/global)" beemacs-secrets-view)
-   ("h" "NEEDS-HUMAN escalations" beemacs-human-list)]
-  ["Pi agent"
-   ("c" "Open/resume pi agent chat buffer" beemacs-pi-chat-open)
-   ("S" "Pi sessions (mru/resume/continue/branch)" beemacs-pi-sessions-open)
-   ("M" "Select default pi model" beemacs-pi-model-select)]
-  ["Actions"
-   ("D" "Plan a named dance" beemacs-dance-plan)
-   ("A" "Apply a named dance" beemacs-dance-apply)
-   ("m" "Merge branch into submodule's tracked branch" beemacs-merge)]
-  ["Other"
-   ("q" "Quit" transient-quit-one)])
+      ["Swarm views"
+       ("d" "Dashboard (all submodules)" beemacs-dashboard)
+       ("s" "Submodule hub (plan/roi/docs/branches/sessions/env/secrets)"
+        beemacs-submodule-view)
+       ("p" "Plan tasks" beemacs-plan-view)
+       ("o" "Docs (change record)" beemacs-docs-view)
+       ("b" "Branches / commit history" beemacs-branches-view)
+       ("k" "Skills / dances registry" beemacs-skills-view)
+       ("t" "Swarm stats" beemacs-stats-view)
+       ("e" "Secrets (per-submodule/global)" beemacs-secrets-view)
+       ("h" "NEEDS-HUMAN escalations" beemacs-human-list)]
+      ["Pi agent"
+       ("c" "Open/resume pi agent chat buffer" beemacs-pi-chat-open)
+       ("S" "Pi sessions (mru/resume/continue/branch)" beemacs-pi-sessions-open)
+       ("M" "Select default pi model" beemacs-pi-model-select)]
+      ["Actions"
+       ("D" "Plan a named dance" beemacs-dance-plan)
+       ("A" "Apply a named dance" beemacs-dance-apply)
+       ("m" "Merge branch into submodule's tracked branch" beemacs-merge)]
+      ["Other"
+       ("q" "Quit" transient-quit-one)])
+  (defun beemacs-menu ()
+    "Stub standing in for the top-level transient menu.
+
+`transient' is unavailable or too old/mismatched to provide
+`transient-define-prefix' in this Emacs -- see
+`beemacs-transient--available-p'. Every other `beemacs-*' command remains
+independently reachable via `M-x'; only this discoverability menu is
+disabled. Signals `user-error' instead of erroring at load time."
+    (interactive)
+    (user-error
+     "beemacs: `transient' unavailable/too old for `beemacs-menu' (every other beemacs command still works via M-x)")))
 
 (provide 'beemacs-transient)
 

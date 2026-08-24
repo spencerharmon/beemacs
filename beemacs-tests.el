@@ -2340,6 +2340,58 @@ placeholder."
   (should (fboundp 'beemacs-menu))
   (should (get 'beemacs-menu 'transient--prefix)))
 
+(ert-deftest beemacs-test-transient-menu-degrades-gracefully-without-transient ()
+  "When `transient' is absent or too old to provide
+`transient-define-prefix', loading `beemacs-transient' in a FRESH Emacs
+process must NOT error, `beemacs-transient--available-p' must be nil, and
+`beemacs-menu' must still be `fboundp' but signal a clear `user-error'
+instead of a void-function/unbound-variable at call time.
+
+Exercised out-of-process (a genuinely separate `emacs -Q --batch') against
+a fake `transient.el' stub that shadows the real one by load-path order
+and merely `(provide \\='transient)'s without defining
+`transient-define-prefix' -- simulating the mismatched-version case,
+since this test's own Emacs already has a working `transient' loaded and
+cannot un-require it in-process."
+  (let* ((this-dir (file-name-directory (locate-library "beemacs-transient")))
+         (stub-dir (make-temp-file "beemacs-transient-stub-" t))
+         (stub-file (expand-file-name "transient.el" stub-dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file stub-file
+            (insert ";;; transient.el --- fake mismatched stub -*- lexical-binding: t; -*-\n"
+                    "(provide 'transient)\n"))
+          (let* ((form
+                  `(progn
+                     (require 'beemacs-transient)
+                     (prin1
+                      (list beemacs-transient--available-p
+                            (fboundp 'beemacs-menu)
+                            (condition-case err
+                                (progn (beemacs-menu) 'no-error)
+                              (user-error (list 'user-error (cadr err)))
+                              (error (list 'other-error (error-message-string err))))))))
+                 (result
+                  (with-temp-buffer
+                    (let ((status
+                           (call-process
+                            (concat invocation-directory invocation-name) nil t nil
+                            "-Q" "--batch"
+                            "-L" stub-dir "-L" this-dir
+                            "--eval" (prin1-to-string form))))
+                      (should (eq status 0))
+                      (goto-char (point-min))
+                      (read (current-buffer)))))
+                 (available-p (nth 0 result))
+                 (menu-bound-p (nth 1 result))
+                 (call-outcome (nth 2 result)))
+            (should-not available-p)
+            (should menu-bound-p)
+            (should (consp call-outcome))
+            (should (eq (car call-outcome) 'user-error))
+            (should (string-match-p "unavailable" (cadr call-outcome)))))
+      (delete-directory stub-dir t))))
+
 (ert-deftest beemacs-test-shared-dispatch-refresh-calls-mode-specific-command ()
   "`beemacs-shared-refresh' resolves to the current major mode's OWN
 refresh command via the dispatch table -- it never reimplements it."
@@ -2459,6 +2511,66 @@ where a bare letter must still self-insert."
    (lambda (event _binding)
      (should (eq event ?\C-c)))
    beemacs-shared-mode-map))
+
+;;; live-integration tests (explicit tag; skipped in the default batch run)
+
+;; These two tests exercise beemacs against REAL external processes -- a
+;; running `beehived' HTTP server and a real `pi' agent process -- rather
+;; than the mocked transport/process fixtures used everywhere else in this
+;; suite. Both are tagged `:live-integration' so they are selectable on
+;; their own (`(ert-run-tests-batch-and-exit \\='(tag :live-integration))'),
+;; and BOTH additionally self-skip via `ert-skip' unless their required
+;; environment variable is set -- so the default, untagged
+;; `ert-run-tests-batch-and-exit' batch run (this task's own `Check:', and
+;; CI's default job) never spends real LLM tokens or requires a live
+;; `beehived' just to pass. Run them explicitly with the env var(s) set:
+;;
+;;   BEEMACS_LIVE_BEEHIVED_URL=http://127.0.0.1:8080 \
+;;     emacs -Q --batch -L . -l ert -l beemacs-tests.el \
+;;       --eval "(ert-run-tests-batch-and-exit '(tag :live-integration))"
+;;
+;;   BEEMACS_LIVE_PI_BIN=pi \
+;;     emacs -Q --batch -L . -l ert -l beemacs-tests.el \
+;;       --eval "(ert-run-tests-batch-and-exit '(tag :live-pi))"
+
+(ert-deftest beemacs-test-live-integration-beehived-dashboard ()
+  :tags '(:live-integration)
+  "Against a REAL running `beehived' (named by
+`BEEMACS_LIVE_BEEHIVED_URL'), `beemacs-api-dashboard' round-trips a real
+HTTP GET and returns a parsed dashboard alist with the expected shape.
+Skipped (not failed) when the env var is unset, so the default batch run
+never depends on a live server."
+  (let ((url (getenv "BEEMACS_LIVE_BEEHIVED_URL")))
+    (unless url
+      (ert-skip "BEEMACS_LIVE_BEEHIVED_URL not set; skipping live beehived integration test"))
+    (let* ((beemacs-endpoint url)
+           (result (beemacs-api-dashboard)))
+      (should (listp result))
+      (should (assq 'subs result))
+      (should (vectorp (alist-get 'subs result))))))
+
+(ert-deftest beemacs-test-live-integration-pi-round-trip ()
+  :tags '(:live-pi)
+  "Against a REAL `pi' executable (named by `BEEMACS_LIVE_PI_BIN'), spawn
+an RPC child via `beemacs-pi-start', send one request, and confirm a
+reply arrives and the process shuts down cleanly via `beemacs-pi-stop'.
+Skipped (not failed) when the env var is unset -- this is the one test in
+the suite that spends real LLM tokens, so it never runs in the default
+batch invocation."
+  (let ((pi-bin (getenv "BEEMACS_LIVE_PI_BIN")))
+    (unless pi-bin
+      (ert-skip "BEEMACS_LIVE_PI_BIN not set; skipping live pi integration test"))
+    (let* ((beemacs-pi-executable pi-bin)
+           (replies nil)
+           (handle (beemacs-pi-start (lambda (msg) (push msg replies)))))
+      (unwind-protect
+          (progn
+            (should (beemacs-pi-alive-p handle))
+            (beemacs-pi-send handle '((type . "ping")))
+            (beemacs-test--wait-for (lambda () replies) 30)
+            (should replies))
+        (beemacs-pi-stop handle)
+        (should-not (beemacs-pi-alive-p handle))))))
 
 (provide 'beemacs-tests)
 

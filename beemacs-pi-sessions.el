@@ -95,7 +95,8 @@ duplicating the file-read logic."
   (beemacs-persistence-read-file beemacs-pi-sessions-persist-file #'listp))
 
 (defun beemacs-pi-sessions--save-mru (ids)
-  "Persist IDS (a list of session id strings) to `beemacs-pi-sessions-persist-file'.
+  "Persist IDS (a list of session id strings) to
+`beemacs-pi-sessions-persist-file'.
 
 Writes via the shared `beemacs-persistence-write-file' helper rather than
 duplicating the file-write logic."

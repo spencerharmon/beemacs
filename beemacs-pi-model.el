@@ -122,7 +122,8 @@ rather than force a choice."
   (append (alist-get 'models record) nil))
 
 (defun beemacs-pi-model-list (&optional executable)
-  "Fetch the list of available provider/model records via a one-shot RPC round trip.
+  "Fetch the list of available provider/model records via a one-shot RPC
+round trip.
 
 Spawns a `pi' RPC process (EXECUTABLE, or `beemacs-pi-executable'), sends
 `{\"type\":\"list_models\"}', waits up to `beemacs-pi-model-list-timeout'

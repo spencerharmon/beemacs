@@ -236,20 +236,6 @@ working/bees) don't re-implement the `subs' vector scan themselves."
   (let ((subs (append (alist-get 'subs (beemacs-api-dashboard)) nil)))
     (cl-find-if (lambda (s) (equal (alist-get 'Name s) name)) subs)))
 
-(defun beemacs-api-plan (name)
-  "Return submodule NAME's live task list.
-
-Mirrors `GET /submodule/{name}/plan.json' (beehived's `planJSON', wrapping
-`planViewData' -- the same claim/running state and doc links the plan
-page and the runner's own selection use). The returned alist carries
-`name' and `plan' (an alist with keys `ROIStamp' and `Items', each item
-carrying the capitalized `PlanItem' struct fields -- `ID', `Status',
-`Desc', `Body', `Deps', `DepStates', `Weight', `Session', `Heartbeat',
-`NotBefore', `Active', `Stale', `Doc', `DocHref', `HumanReason',
-`Category', `Running', `SessionHref' -- no json tags, so decoded keys are
-the exact capitalized Go field names)."
-  (beemacs-api-json-request (format "/submodule/%s/plan.json" name)))
-
 (defun beemacs-api-roi (name)
   "Return submodule NAME's raw ROI.md content and tracked remote url.
 

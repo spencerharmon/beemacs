@@ -19,10 +19,37 @@ jobs:
         run: |
           emacs -Q --batch -L . \
             --eval "(setq byte-compile-error-on-warn t)" \
-            -f batch-byte-compile beemacs.el beemacs-transport.el \
-            beemacs-api.el beemacs-render.el
+            -f batch-byte-compile \
+            beemacs-transport.el beemacs-persistence.el beemacs-streaming.el \
+            beemacs-api.el beemacs-render.el beemacs-editor.el beemacs-env.el \
+            beemacs-pi.el beemacs-pi-chat.el beemacs-pi-sessions.el \
+            beemacs-pi-model.el beemacs-session.el beemacs-human.el \
+            beemacs-stats.el beemacs-transient.el beemacs.el
 
-      - name: Run ERT test suite
+      - name: checkdoc (every landed .el file's docstrings; reports, does not gate)
+        run: |
+          emacs -Q --batch -L . \
+            --eval "(require 'checkdoc)" \
+            --eval "
+              (dolist (file '(\"beemacs.el\" \"beemacs-transport.el\"
+                               \"beemacs-persistence.el\" \"beemacs-streaming.el\"
+                               \"beemacs-api.el\" \"beemacs-render.el\"
+                               \"beemacs-editor.el\" \"beemacs-env.el\"
+                               \"beemacs-pi.el\" \"beemacs-pi-chat.el\"
+                               \"beemacs-pi-sessions.el\" \"beemacs-pi-model.el\"
+                               \"beemacs-session.el\" \"beemacs-human.el\"
+                               \"beemacs-stats.el\" \"beemacs-transient.el\"))
+                (with-current-buffer (find-file-noselect file)
+                  (checkdoc-current-buffer t)))" \
+            --eval "(when (get-buffer \"*Style Warnings*\")
+                      (princ (with-current-buffer \"*Style Warnings*\" (buffer-string))))"
+        # Informational: today's docstrings carry ~150 pre-existing minor
+        # style nits (two-spaces-after-period, escaped open-parens, etc.)
+        # across files that predate this task. Printed above for visibility
+        # but not gated on -- gating would fail every push until a dedicated
+        # docstring-cleanup pass lands, which is out of this task's scope.
+
+      - name: Run ERT test suite (default batch: excludes live-integration/live-pi)
         run: |
           emacs -Q --batch -L . -l ert -l beemacs-tests.el \
             -f ert-run-tests-batch-and-exit

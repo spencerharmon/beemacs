@@ -103,7 +103,8 @@ deploy call succeeded but the reported active env does not match TARGET
 
 ;;;###autoload
 (defun beemacs-instruction-update ()
-  "Trigger a managed-instruction refresh (the `beehive instruction update' equivalent).
+  "Trigger a managed-instruction refresh (the `beehive instruction
+update' equivalent).
 
 Performs `POST /instruction/update' and reports the server's real JSON
 response (or its real transport/HTTP error) via `message'. There is

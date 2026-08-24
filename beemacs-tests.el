@@ -24,6 +24,8 @@
 (require 'beemacs-streaming)
 (require 'beemacs-session)
 (require 'beemacs-human)
+(require 'beemacs-stats)
+(require 'beemacs-transient)
 
 (ert-deftest beemacs-test-version-defined ()
   "Smoke test: `beemacs-version' is defined and looks like a version string."
@@ -2232,6 +2234,134 @@ user declines confirmation."
         (should-not called))
     (when (get-buffer "*beemacs-human: jellyfin/t1*")
       (kill-buffer "*beemacs-human: jellyfin/t1*"))))
+
+;;; beemacs-transient / shared keymap tests
+
+(ert-deftest beemacs-test-menu-is-a-transient-prefix ()
+  "`beemacs-menu' is defined as a real `transient' prefix command, not a
+placeholder."
+  (should (fboundp 'beemacs-menu))
+  (should (get 'beemacs-menu 'transient--prefix)))
+
+(ert-deftest beemacs-test-shared-dispatch-refresh-calls-mode-specific-command ()
+  "`beemacs-shared-refresh' resolves to the current major mode's OWN
+refresh command via the dispatch table -- it never reimplements it."
+  (let ((buf (generate-new-buffer "*beemacs-shared-test-dashboard*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (beemacs-dashboard-mode)
+          (let (called)
+            (cl-letf (((symbol-function 'beemacs-dashboard-refresh)
+                       (lambda () (interactive) (setq called t))))
+              (beemacs-shared-refresh))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest beemacs-test-shared-dispatch-drill-in-calls-mode-specific-command ()
+  "`beemacs-shared-drill-in' resolves to the current major mode's OWN
+drill-in command."
+  (let ((buf (generate-new-buffer "*beemacs-shared-test-skills*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (beemacs-skills-mode)
+          (let (called)
+            (cl-letf (((symbol-function 'beemacs-skills-open-at-point)
+                       (lambda () (interactive) (setq called t))))
+              (beemacs-shared-drill-in))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest beemacs-test-shared-dispatch-act-calls-mode-specific-command ()
+  "`beemacs-shared-act' resolves to the current major mode's OWN act
+command (e.g. dance-plan apply)."
+  (let ((buf (generate-new-buffer "*beemacs-shared-test-dance-plan*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (beemacs-dance-plan-mode)
+          (let (called)
+            (cl-letf (((symbol-function 'beemacs-dance-plan-apply)
+                       (lambda () (interactive) (setq called t))))
+              (beemacs-shared-act))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest beemacs-test-shared-dispatch-stream-calls-mode-specific-command ()
+  "`beemacs-shared-stream' resolves to `beemacs-submodule-view-sessions' in
+`beemacs-submodule-view-mode'."
+  (let ((buf (generate-new-buffer "*beemacs-shared-test-submodule*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (beemacs-submodule-view-mode)
+          (let (called)
+            (cl-letf (((symbol-function 'beemacs-submodule-view-sessions)
+                       (lambda () (interactive) (setq called t))))
+              (beemacs-shared-stream))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest beemacs-test-shared-dispatch-abort-calls-mode-specific-command ()
+  "`beemacs-shared-abort' resolves to `beemacs-human-resolve-discard' in
+`beemacs-human-resolve-mode'."
+  (let ((buf (generate-new-buffer "*beemacs-shared-test-human-resolve*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (beemacs-human-resolve-mode)
+          (let (called)
+            (cl-letf (((symbol-function 'beemacs-human-resolve-discard)
+                       (lambda () (interactive) (setq called t))))
+              (beemacs-shared-abort))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest beemacs-test-shared-dispatch-signals-when-verb-unsupported ()
+  "A verb absent from the current major mode's dispatch entry signals a
+real `user-error', never a silent no-op."
+  (let ((buf (generate-new-buffer "*beemacs-shared-test-stats*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (beemacs-stats-mode)
+          (should-error (beemacs-shared-act) :type 'user-error))
+      (kill-buffer buf))))
+
+(ert-deftest beemacs-test-shared-dispatch-signals-for-unmapped-major-mode ()
+  "A major mode with no dispatch-table entry at all also signals
+`user-error' rather than silently doing nothing."
+  (let ((buf (generate-new-buffer "*beemacs-shared-test-fundamental*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (fundamental-mode)
+          (should-error (beemacs-shared-refresh) :type 'user-error))
+      (kill-buffer buf))))
+
+(ert-deftest beemacs-test-shared-mode-auto-enabled-in-beemacs-major-modes ()
+  "`beemacs-shared-mode' is turned on automatically by every beemacs major
+mode's own mode hook, so its keymap is present without any manual step."
+  (dolist (mode '(beemacs-dashboard-mode
+                  beemacs-docs-mode
+                  beemacs-branches-mode
+                  beemacs-plan-mode
+                  beemacs-submodule-view-mode
+                  beemacs-secrets-view-mode
+                  beemacs-skills-mode
+                  beemacs-dance-plan-mode
+                  beemacs-human-list-mode
+                  beemacs-stats-mode))
+    (let ((buf (generate-new-buffer (format "*beemacs-shared-auto-%s*" mode))))
+      (unwind-protect
+          (with-current-buffer buf
+            (funcall mode)
+            (should beemacs-shared-mode))
+        (kill-buffer buf)))))
+
+(ert-deftest beemacs-test-shared-keymap-uses-c-c-prefix-only ()
+  "Every binding in `beemacs-shared-mode-map' lives under the `C-c' prefix
+so it layers over, and never shadows, a mode's own single-letter
+bindings -- including an editable buffer like `beemacs-roi-edit-mode'
+where a bare letter must still self-insert."
+  (map-keymap
+   (lambda (event _binding)
+     (should (eq event ?\C-c)))
+   beemacs-shared-mode-map))
 
 (provide 'beemacs-tests)
 

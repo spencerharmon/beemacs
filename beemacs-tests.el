@@ -2084,6 +2084,209 @@ generic \"done\" message."
       (should (string-match-p "FAILED" msg))
       (should (string-match-p "merge conflict" msg)))))
 
+;;; Fleet management tests (submodule add/link/set-remote)
+
+(ert-deftest beemacs-test-api-submodule-add-encodes-all-fields ()
+  "`beemacs-api-submodule-add' POSTs `url', `name', and `branch' as
+form-urlencoded fields to `/submodule/add' when all three are given."
+  (let (seen-path seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-path url
+                       seen-data url-request-data)
+                 (list 200 nil "ok"))))
+      (beemacs-api-submodule-add "https://example.com/x.git" "x" "main")
+      (should (string-match-p "/submodule/add\\'" seen-path))
+      (should (equal seen-data
+                     (encode-coding-string
+                      "url=https%3A%2F%2Fexample.com%2Fx.git&name=x&branch=main"
+                      'utf-8))))))
+
+(ert-deftest beemacs-test-api-submodule-add-omits-blank-optional-fields ()
+  "`beemacs-api-submodule-add' omits `name'/`branch' entirely when not given,
+mirroring beehived's derive-from-URL/no-branch defaults."
+  (let (seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (_url) (setq seen-data url-request-data) (list 200 nil "ok"))))
+      (beemacs-api-submodule-add "https://example.com/x.git")
+      (should (equal seen-data
+                     (encode-coding-string "url=https%3A%2F%2Fexample.com%2Fx.git" 'utf-8))))))
+
+(ert-deftest beemacs-test-api-submodule-add-success-returns-body ()
+  "`beemacs-api-submodule-add' returns the raw response body on a 2xx
+`POST /submodule/add'."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "<div>dashboard</div>")))
+    (should (equal (beemacs-api-submodule-add "https://example.com/x.git")
+                   "<div>dashboard</div>"))))
+
+(ert-deftest beemacs-test-api-submodule-add-conflict-surfaces-true-error-text ()
+  "`beemacs-api-submodule-add' surfaces the real plain-text `http.Error'
+body on a 409 (name already exists), never a synthesized message."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 409 "submodule already exists")))
+    (let ((err (should-error (beemacs-api-submodule-add "https://example.com/x.git" "x")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "submodule already exists" (cadr err))))))
+
+(ert-deftest beemacs-test-api-submodule-add-connection-failure-signals ()
+  "A connection failure during `beemacs-api-submodule-add' still signals
+`beemacs-api-error' (never assumed success)."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url) (signal 'beemacs-http-error (list "connection refused")))))
+    (should-error (beemacs-api-submodule-add "https://example.com/x.git")
+                  :type 'beemacs-api-error)))
+
+(ert-deftest beemacs-test-api-submodule-link-encodes-from-to ()
+  "`beemacs-api-submodule-link' POSTs `from'/`to' as form-urlencoded
+fields to `/submodule/link'."
+  (let (seen-path seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-path url
+                       seen-data url-request-data)
+                 (list 200 nil "ok"))))
+      (beemacs-api-submodule-link "alpha" "beta")
+      (should (string-match-p "/submodule/link\\'" seen-path))
+      (should (equal seen-data (encode-coding-string "from=alpha&to=beta" 'utf-8))))))
+
+(ert-deftest beemacs-test-api-submodule-link-success-returns-body ()
+  "`beemacs-api-submodule-link' returns the raw response body on a 2xx
+`POST /submodule/link'."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "<div>links</div>")))
+    (should (equal (beemacs-api-submodule-link "alpha" "beta") "<div>links</div>"))))
+
+(ert-deftest beemacs-test-api-submodule-link-cycle-surfaces-true-error-text ()
+  "`beemacs-api-submodule-link' surfaces the real plain-text `http.Error'
+body on a 409 (would form a wait-cycle), never a synthesized message."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 409 "dependency would form a cycle")))
+    (let ((err (should-error (beemacs-api-submodule-link "alpha" "beta")
+                              :type 'beemacs-api-error)))
+      (should (string-match-p "cycle" (cadr err))))))
+
+(ert-deftest beemacs-test-api-submodule-link-connection-failure-signals ()
+  "A connection failure during `beemacs-api-submodule-link' still signals
+`beemacs-api-error' (never assumed success)."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url) (signal 'beemacs-http-error (list "connection refused")))))
+    (should-error (beemacs-api-submodule-link "alpha" "beta") :type 'beemacs-api-error)))
+
+(ert-deftest beemacs-test-api-submodule-set-remote-encodes-url-to-name-path ()
+  "`beemacs-api-submodule-set-remote' POSTs `url' to
+`/submodule/{name}/remote', with NAME in the path, not the form body."
+  (let (seen-path seen-data)
+    (cl-letf (((symbol-function 'beemacs-transport--call)
+               (lambda (url)
+                 (setq seen-path url
+                       seen-data url-request-data)
+                 (list 200 nil "ok"))))
+      (beemacs-api-submodule-set-remote "beemacs" "https://example.com/new.git")
+      (should (string-match-p "/submodule/beemacs/remote\\'" seen-path))
+      (should (equal seen-data
+                     (encode-coding-string "url=https%3A%2F%2Fexample.com%2Fnew.git" 'utf-8))))))
+
+(ert-deftest beemacs-test-api-submodule-set-remote-success-returns-body ()
+  "`beemacs-api-submodule-set-remote' returns the raw response body on a
+2xx `POST /submodule/{name}/remote'."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 200 "<div>roi editor</div>")))
+    (should (equal (beemacs-api-submodule-set-remote "beemacs" "https://example.com/new.git")
+                   "<div>roi editor</div>"))))
+
+(ert-deftest beemacs-test-api-submodule-set-remote-not-found-surfaces-true-error-text ()
+  "`beemacs-api-submodule-set-remote' surfaces the real plain-text
+`http.Error' body on a 404 (unknown submodule), never a synthesized
+message."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (beemacs-test--mock-call 404 "no such submodule")))
+    (let ((err (should-error
+                (beemacs-api-submodule-set-remote "nope" "https://example.com/new.git")
+                :type 'beemacs-api-error)))
+      (should (string-match-p "no such submodule" (cadr err))))))
+
+(ert-deftest beemacs-test-api-submodule-set-remote-connection-failure-signals ()
+  "A connection failure during `beemacs-api-submodule-set-remote' still
+signals `beemacs-api-error' (never assumed success)."
+  (cl-letf (((symbol-function 'beemacs-transport--call)
+             (lambda (_url) (signal 'beemacs-http-error (list "connection refused")))))
+    (should-error (beemacs-api-submodule-set-remote "beemacs" "https://example.com/new.git")
+                  :type 'beemacs-api-error)))
+
+(ert-deftest beemacs-test-submodule-add-command-reports-true-success ()
+  "`beemacs-submodule-add' echoes a message only after
+`beemacs-api-submodule-add' actually succeeds (no assumed-success
+message on failure)."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-submodule-add)
+               (lambda (_url _name _branch) "ok"))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-submodule-add "https://example.com/x.git" "x" nil)
+      (should (string-match-p "registered" msg)))))
+
+(ert-deftest beemacs-test-submodule-add-command-reports-true-failure ()
+  "`beemacs-submodule-add' echoes the TRUE backend error text on
+failure, never a generic \"done\" message."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-submodule-add)
+               (lambda (_url _name _branch)
+                 (signal 'beemacs-api-error '("submodule already exists (/submodule/add)"))))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-submodule-add "https://example.com/x.git" "x" nil)
+      (should (string-match-p "FAILED" msg))
+      (should (string-match-p "already exists" msg)))))
+
+(ert-deftest beemacs-test-submodule-link-command-reports-true-success ()
+  "`beemacs-submodule-link' echoes a message only after
+`beemacs-api-submodule-link' actually succeeds."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-submodule-link)
+               (lambda (_from _to) "ok"))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-submodule-link "alpha" "beta")
+      (should (string-match-p "registered" msg)))))
+
+(ert-deftest beemacs-test-submodule-link-command-reports-true-failure ()
+  "`beemacs-submodule-link' echoes the TRUE backend error text on
+failure, never a generic \"done\" message."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-submodule-link)
+               (lambda (_from _to)
+                 (signal 'beemacs-api-error '("dependency would form a cycle (/submodule/link)"))))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-submodule-link "alpha" "beta")
+      (should (string-match-p "FAILED" msg))
+      (should (string-match-p "cycle" msg)))))
+
+(ert-deftest beemacs-test-submodule-set-remote-command-reports-true-success ()
+  "`beemacs-submodule-set-remote' echoes a message only after
+`beemacs-api-submodule-set-remote' actually succeeds."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-submodule-set-remote)
+               (lambda (_name _url) "ok"))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-submodule-set-remote "beemacs" "https://example.com/new.git")
+      (should (string-match-p "remote set" msg)))))
+
+(ert-deftest beemacs-test-submodule-set-remote-command-reports-true-failure ()
+  "`beemacs-submodule-set-remote' echoes the TRUE backend error text on
+failure, never a generic \"done\" message."
+  (let (msg)
+    (cl-letf (((symbol-function 'beemacs-api-submodule-set-remote)
+               (lambda (_name _url)
+                 (signal 'beemacs-api-error '("no such submodule (/submodule/nope/remote)"))))
+              ((symbol-function 'message) (lambda (fmt &rest args)
+                                             (setq msg (apply #'format fmt args)))))
+      (beemacs-submodule-set-remote "nope" "https://example.com/new.git")
+      (should (string-match-p "FAILED" msg))
+      (should (string-match-p "no such submodule" msg)))))
+
 ;;; beemacs-human tests
 
 (ert-deftest beemacs-test-render-human-rows ()

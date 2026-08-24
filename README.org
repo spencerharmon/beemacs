@@ -5,15 +5,137 @@
 
 beemacs is an Emacs interface to a [[https://github.com/spencerharmon/beehive][beehive]] install — the coordination
 layer for an autonomous self-improvement swarm. It talks to the running
-=beehived= HTTP server and aims to be *feature-complete with the beehive
-web UI*: browsing submodules, plans/tasks, ROIs, docs, live session
-transcripts, human (=NEEDS-HUMAN=) escalation resolution, the agentic
-editor, dances, hygiene, secrets, and swarm stats — all from Emacs.
+=beehived= HTTP server over plain HTTP and aims to be *feature-complete
+with the beehive web UI*: browsing submodules, plans/tasks, ROIs, docs,
+live session transcripts, human (=NEEDS-HUMAN=) escalation resolution,
+the agentic editor, dances, hygiene, secrets, and swarm stats — all from
+Emacs, without leaving your editor.
 
 Modeled on [[https://github.com/spencerharmon/cavemacs][cavemacs]] (the Emacs front-end for caveman-code): a native
 Emacs package, streaming buffers, transient menus, per-install session
 persistence.
 
+** Relationship to beehive
+
+beemacs is a *client only* — it never runs the swarm itself. Everything
+it shows (dashboard rows, plans, docs, sessions, secrets, env state) is
+fetched from a =beehived= HTTP endpoint you point it at (see
+[[*Configuration][Configuration]] below); everything it lets you do (approve a review,
+resolve a =NEEDS-HUMAN= escalation, deploy a blue/green env, run a
+dance) is a normal HTTP call to that same server. Nothing beemacs does
+bypasses the swarm's protocol invariants (claim/heartbeat, the submodule
+pointer, the merge-to-=main= gate) — it is exactly the web UI, wearing
+Emacs buffers instead of HTML pages.
+
+** Relationship to the pi harness
+
+Separately from the beehive client, beemacs also embeds a front end for
+[[https://github.com/badlogic/pi-mono][pi]] (the coding-agent CLI the swarm's own honeybees run): a child-process
+transport (RPC over newline-delimited JSON, with a one-shot JSON-print
+fallback), a streaming chat buffer, a session browser (resume/continue/
+branch), and provider/model selection. This lets you drive a =pi= agent
+— on this machine, against any repo, not only a beehive one — directly
+from Emacs, using the same buffers and keymap as the beehive views. The
+two halves (beehive client, pi harness) are independent: you can use
+either without the other.
+
 * Status
 
-Bootstrapping. The swarm builds beemacs from this README up.
+Bootstrapping. The swarm builds beemacs from this README up; treat every
+command below as landed once its owning task is =DONE=, and expect gaps
+elsewhere in the meantime.
+
+* Requirements
+
+- Emacs 27.1 or later (Emacs 28+ additionally unlocks =beemacs-menu=,
+  which requires the =transient= library that ships built-in from 28 on;
+  on 27.x every command remains reachable via =M-x=, you simply lose the
+  transient menu wrapper).
+- A running =beehived= instance you can reach over HTTP (local or
+  remote) — see the parent [[https://github.com/spencerharmon/beehive][beehive]] repo for standing one up.
+- A working =pi= install on your =PATH= (or any location you point
+  =beemacs-pi-executable= at) if you want the pi-agent features; the
+  beehive-client features work without it.
+- No other non-built-in Emacs package dependencies beyond =transient=
+  (for the menu) and =json=/=cl-lib= (both built in).
+
+* Install
+
+** straight.el (recommended)
+
+#+begin_src emacs-lisp
+(use-package beemacs
+  :straight (beemacs :type git :host github
+                      :repo "spencerharmon/beemacs"
+                      :files ("*.el"))
+  :custom
+  (beemacs-endpoint "http://127.0.0.1:8080")   ; your beehived instance
+  (beemacs-pi-executable "pi"))                ; or an absolute path
+#+end_src
+
+A ready-made recipe is also shipped as =straight-recipe.el= in this repo
+for a local recipe-repository override.
+
+** Manual
+
+Clone this repo somewhere on your =load-path= and require it:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/beemacs")
+(require 'beemacs)
+(setq beemacs-endpoint "http://127.0.0.1:8080")
+(setq beemacs-pi-executable "pi")
+#+end_src
+
+* Configuration
+
+Two settings matter for almost every feature:
+
+- =beemacs-endpoint= — the base URL of the =beehived= HTTP server this
+  install talks to (default =http://127.0.0.1:8080=, a loopback address
+  suitable only for local development — point it at your own instance;
+  no real/production host is ever baked in as a shipped default).
+- =beemacs-pi-executable= — the =pi= binary beemacs spawns for the
+  agent-harness features: a bare command resolved via =exec-path=/=PATH=,
+  or an absolute path to a specific build. Changeable at runtime with
+  =beemacs-pi-set-executable=, which persists the choice for future
+  sessions.
+
+Pi's provider/model choice (e.g. =anthropic/claude-sonnet-4=,
+=openai/gpt-5=) is selected separately, per install or per chat-buffer
+session — see =beemacs-pi-model-select= in the quick-start below.
+
+* Quick start
+
+1. Load beemacs (per the install recipes above) with =beemacs-endpoint=
+   pointed at your =beehived= instance.
+2. ~M-x beemacs-dashboard~ — opens =*beemacs-dashboard*=, a
+   =tabulated-list-mode= buffer of every submodule the hive tracks (name,
+   ready/blocked/=NEEDS-HUMAN= task counts, etc). Press =g= to refresh,
+   =RET= on a row to drill into that submodule's plan/roi/docs/branches/
+   sessions/env/secrets hub.
+3. ~M-x beemacs-menu~ (or =C-c C-m= from any beemacs buffer, once
+   =transient= is available) — the top-level menu grouping every landed
+   view:
+   - *Swarm views*: dashboard, submodule hub, plan tasks, docs, branches,
+     skills/dances registry, swarm stats, secrets, =NEEDS-HUMAN= list.
+   - *Pi agent*: open/resume the pi chat buffer, browse pi sessions,
+     select the default pi provider/model.
+   - *Actions*: plan/apply a dance, merge a branch into a submodule's
+     tracked branch.
+4. To drive an agent instead of just browsing: ~M-x beemacs-pi-chat-open~
+   prompts for a session name and opens a streaming chat buffer backed by
+   a =pi= child process (RPC transport) — type your prompt, watch the
+   response stream in, =C-c k= (via =beemacs-shared-mode=) to abort a
+   running turn. ~M-x beemacs-pi-sessions-open~ lists pi's own session
+   history (most-recently-used first) with resume/continue/branch
+   actions bound per row. ~M-x beemacs-pi-model-select~ queries the =pi=
+   process for its available providers/models and lets you pick one via
+   =completing-read=, either as this install's persisted default or as a
+   one-off override for the current chat buffer.
+
+Every command above is independently reachable via =M-x= and carries its
+own docstring (=C-h f beemacs-dashboard=, etc.) — =beemacs-menu= and the
+shared cross-buffer keymap (=beemacs-shared-mode=: refresh/drill-in/act/
+stream/abort, consistent across every beemacs major mode) are purely a
+discoverability layer on top, never a replacement.

@@ -958,6 +958,13 @@ wrong\". See `beemacs-api-merge' for the full request/error contract."
     (beemacs-api-error
      (message "beemacs-merge FAILED: %s" (car (cdr err))))))
 
+;; Loaded last: it wires the top-level `beemacs-menu' transient prefix and
+;; `beemacs-shared-mode' (a shared refresh/drill-in/act/stream/abort keymap
+;; installed in every major mode above) over the commands already defined
+;; in this file and the required modules above -- it never reimplements
+;; them.
+(require 'beemacs-transient)
+
 (provide 'beemacs)
 
 ;;; beemacs.el ends here

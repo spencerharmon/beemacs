@@ -202,7 +202,7 @@ beemacs major mode; see `beemacs-shared-mode-map' and
 
 Wires existing `beemacs-*' commands only -- each suffix below just calls
 the command that already implements that surface (`beemacs-dashboard',
-`beemacs-pi-chat-open', etc.); see each command's own docstring for what
+`beemacs', etc.); see each command's own docstring for what
 it does. Also reachable from any beemacs buffer via `C-c C-m'
 (`beemacs-shared-mode-map')."
       ["Swarm views"
@@ -217,8 +217,9 @@ it does. Also reachable from any beemacs buffer via `C-c C-m'
        ("e" "Secrets (per-submodule/global)" beemacs-secrets-view)
        ("h" "NEEDS-HUMAN escalations" beemacs-human-list)]
       ["Pi agent"
-       ("c" "Open/resume pi agent chat buffer" beemacs-pi-chat-open)
-       ("S" "Pi sessions (mru/resume/continue/branch)" beemacs-pi-sessions-open)
+       ("c" "Start pi agent session at repo root" beemacs)
+       ("C" "Open/resume a NAMED pi agent chat buffer" beemacs-pi-chat-open)
+       ("S" "Pi sessions (mru/resume/continue/branch)" beemacs-sessions)
        ("M" "Select default pi model" beemacs-pi-model-select)]
       ["Actions"
        ("D" "Plan a named dance" beemacs-dance-plan)

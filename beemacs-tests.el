@@ -2775,19 +2775,18 @@ batch invocation."
         (beemacs-pi-stop handle)
         (should-not (beemacs-pi-alive-p handle))))))
 
-;;; Cavemacs-cribbed global entry points (RED — requirement not yet built)
+;;; Cavemacs-cribbed global entry points
 ;;
 ;; The operator's intent is that beemacs crib cavemacs's interface directly:
 ;; a single global `beemacs' command that drops the operator straight into an
 ;; agent prompt at the repo root (no session-name round-trip, exactly as
 ;; starting a session at the repo root does in cavemacs), and a global
 ;; `beemacs-sessions' command that browses and resumes/restarts past sessions.
-;; Today neither symbol exists as a command -- the only entry points are
-;; `beemacs-pi-chat-open' (prompts for a session NAME first, then a manual
-;; send) and `beemacs-pi-sessions-open' (a pi session-tree browser under a
-;; different name).  These tests assert the real commands via `commandp'
-;; (genuine command existence, not a source grep) and are intentionally
-;; failing until the interface is cribbed.
+;; Before this, the only entry points were `beemacs-pi-chat-open' (prompts
+;; for a session NAME first, then a manual send) and `beemacs-pi-sessions-open'
+;; (a pi session-tree browser under a different name). These tests assert the
+;; real commands via `commandp' (genuine command existence, not a source
+;; grep) plus their actual behavior against fake-pi RPC fixtures.
 
 (ert-deftest beemacs-test-global-command-exists ()
   "`beemacs' is an interactive command (the global entry point)."
@@ -2804,6 +2803,108 @@ drops straight into a prompt at the repo root."
 (ert-deftest beemacs-test-sessions-command-exists ()
   "`beemacs-sessions' is an interactive command (the session browser)."
   (should (commandp 'beemacs-sessions)))
+
+(ert-deftest beemacs-test-global-command-spawns-turn-at-repo-root-immediately ()
+  "`beemacs' spawns a live pi turn at the repo root with no session-name
+round-trip: calling it with no arguments (via `call-interactively', exactly
+as `M-x beemacs' would) starts a `pi' RPC child immediately and the
+resulting chat buffer's `default-directory' is the repo root, not wherever
+the caller happened to be, or an unrelated temp directory a session-name
+prompt would have run under."
+  (let* ((tmproot (file-name-as-directory (make-temp-file "beemacs-test-root-" t)))
+         (subdir (expand-file-name "sub/dir/" tmproot))
+         (beemacs-pi-executable
+          (beemacs-test--make-fake-pi-rpc-events
+           (json-encode '((type . "turn_start")))
+           (json-encode '((type . "token") (text . "hi")))
+           (json-encode '((type . "turn_end")))))
+         buf)
+    (unwind-protect
+        (progn
+          (make-directory subdir t)
+          (make-directory (expand-file-name ".git" tmproot) t)
+          (let ((default-directory subdir))
+            (setq buf (call-interactively #'beemacs)))
+          (should (buffer-live-p buf))
+          (with-current-buffer buf
+            ;; The turn started with no prior session-name prompt: the fake
+            ;; `pi' RPC child is already alive and streaming immediately.
+            (beemacs-test--wait-for
+             (lambda () (string-match-p "hi" (buffer-string))))
+            (should (string-match-p "hi" (buffer-string)))
+            (should (beemacs-pi-alive-p beemacs-pi-chat--handle))
+            ;; Spawned at the repo root (where `.git' lives), not the
+            ;; caller's nested `subdir'.
+            (should (string-equal
+                     (file-truename (directory-file-name default-directory))
+                     (file-truename (directory-file-name tmproot))))))
+      (when (buffer-live-p buf)
+        (let (kill-buffer-query-functions) (kill-buffer buf)))
+      (delete-directory tmproot t))))
+
+(ert-deftest beemacs-test-global-command-auto-derives-distinct-session-names ()
+  "Two immediate `beemacs' invocations never collide on the same buffer name.
+Because `beemacs' auto-derives its session name instead of prompting, two
+calls in a row must still each get their own live chat buffer."
+  (let* ((beemacs-pi-executable (beemacs-test--make-fake-pi-rpc "cat >/dev/null\n"))
+         buf1 buf2)
+    (unwind-protect
+        (progn
+          (setq buf1 (call-interactively #'beemacs))
+          (setq buf2 (call-interactively #'beemacs))
+          (should (buffer-live-p buf1))
+          (should (buffer-live-p buf2))
+          (should-not (eq buf1 buf2)))
+      (dolist (b (list buf1 buf2))
+        (when (buffer-live-p b)
+          (let (kill-buffer-query-functions) (kill-buffer b)))))))
+
+(ert-deftest beemacs-test-sessions-command-lists-past-sessions ()
+  "`beemacs-sessions' pops the pi session-tree browser populated from pi's
+real `session_list' reply, exactly like the underlying
+`beemacs-pi-sessions-open' it wraps."
+  (let* ((sessions (vector '((id . "s1") (label . "root") (parent . :null)
+                             (updated . "2026-01-01"))))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-session-list sessions)))
+    (unwind-protect
+        (progn
+          (call-interactively #'beemacs-sessions)
+          (with-current-buffer "*beemacs-pi-sessions*"
+            (should (derived-mode-p 'beemacs-pi-sessions-mode))
+            (should (= (length beemacs-pi-sessions--records) 1))
+            (should (equal (beemacs-pi-sessions--session-id
+                            (car beemacs-pi-sessions--records))
+                           "s1"))))
+      (let (kill-buffer-query-functions)
+        (when (get-buffer "*beemacs-pi-sessions*")
+          (kill-buffer "*beemacs-pi-sessions*"))))))
+
+(ert-deftest beemacs-test-sessions-command-resumes-selected-session ()
+  "From the `beemacs-sessions' browser, resuming the entry at point drives
+pi's real `resume' request against that session's id -- proving
+`beemacs-sessions' is wired to the same resume/restart machinery as
+`beemacs-pi-sessions-resume', not merely a renamed no-op."
+  (let* ((beemacs-pi-sessions-persist-file (make-temp-file "beemacs-pi-sessions-mru-"))
+         (sessions (vector '((id . "sess-99") (label . "99") (parent . :null)
+                             (updated . "2026-01-01"))))
+         (beemacs-pi-executable (beemacs-test--make-fake-pi-session-list sessions))
+         sent resumed-buf)
+    (unwind-protect
+        (progn
+          (call-interactively #'beemacs-sessions)
+          (with-current-buffer "*beemacs-pi-sessions*"
+            (goto-char (point-min))
+            (cl-letf (((symbol-function 'beemacs-pi-send)
+                       (lambda (_handle request) (push request sent))))
+              (setq resumed-buf (beemacs-pi-sessions-resume))))
+          (should (equal (alist-get 'type (car sent)) "resume"))
+          (should (equal (alist-get 'id (car sent)) "sess-99"))
+          (should (equal (beemacs-pi-sessions-mru) '("sess-99"))))
+      (delete-file beemacs-pi-sessions-persist-file)
+      (let (kill-buffer-query-functions)
+        (when (buffer-live-p resumed-buf) (kill-buffer resumed-buf))
+        (when (get-buffer "*beemacs-pi-sessions*")
+          (kill-buffer "*beemacs-pi-sessions*"))))))
 
 (provide 'beemacs-tests)
 

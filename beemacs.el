@@ -1047,6 +1047,59 @@ request/error contract."
     (beemacs-api-error
      (message "beemacs-submodule-set-remote FAILED: %s" (car (cdr err))))))
 
+;;; Global entry points (cribbed directly from cavemacs's interface)
+;;
+;; cavemacs exposes exactly two top-level entry points: a bare `beemacs'
+;; command that drops the operator straight into an agent prompt at the
+;; repo root (no session-name round-trip), and a `beemacs-sessions' browser
+;; that lists/resumes/restarts past sessions. The pi harness landed with
+;; only the lower-level, differently-shaped `beemacs-pi-chat-open' (which
+;; PROMPTS for a session name before it lets you type anything) and
+;; `beemacs-pi-sessions-open'. These two commands crib cavemacs's UX onto
+;; that existing machinery -- thin wrappers, no reimplementation -- so both
+;; the old and the new entry points keep working.
+
+(defun beemacs--auto-session-name ()
+  "Auto-derive a pi agent session name for the repo at `default-directory'.
+
+Combines the repo root's directory name with a timestamp so concurrent
+global `beemacs' sessions never collide, and so `beemacs' never has to
+ask the operator for a name the way `beemacs-pi-chat-open' does."
+  (let* ((root (or (locate-dominating-file default-directory ".git")
+                    default-directory))
+         (dirname (file-name-nondirectory
+                   (directory-file-name (expand-file-name root)))))
+    (format "%s-%s" dirname (format-time-string "%Y%m%d%H%M%S%3N"))))
+
+;;;###autoload
+(defun beemacs ()
+  "Start a pi agent session immediately at the repo root.
+
+The global entry point cribbed directly from cavemacs's \"start a
+session at the repo root\" flow: unlike `beemacs-pi-chat-open', which
+requires a session NAME up front before it lets you type anything, this
+command takes no arguments and drops straight into a live agent prompt.
+It thinly wraps `beemacs-pi-chat-open', auto-deriving the session name
+via `beemacs--auto-session-name' and running it with `default-directory'
+pinned to the repo root, so the underlying transport/harness is
+unchanged -- only the entry-point UX is cribbed."
+  (interactive)
+  (let ((default-directory (or (locate-dominating-file default-directory ".git")
+                                default-directory)))
+    (beemacs-pi-chat-open (beemacs--auto-session-name))))
+
+;;;###autoload
+(defun beemacs-sessions ()
+  "Browse past pi agent sessions and resume/restart any of them.
+
+The global session browser cribbed directly from cavemacs's interface;
+a top-level alias for `beemacs-pi-sessions-open' (renamed/exposed under
+cavemacs's name, not reimplemented) so existing keybindings and
+persistence built on `beemacs-pi-sessions-open' keep working
+underneath."
+  (interactive)
+  (beemacs-pi-sessions-open))
+
 ;; Loaded last: it wires the top-level `beemacs-menu' transient prefix and
 ;; `beemacs-shared-mode' (a shared refresh/drill-in/act/stream/abort keymap
 ;; installed in every major mode above) over the commands already defined

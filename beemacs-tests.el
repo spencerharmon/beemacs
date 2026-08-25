@@ -2775,6 +2775,36 @@ batch invocation."
         (beemacs-pi-stop handle)
         (should-not (beemacs-pi-alive-p handle))))))
 
+;;; Cavemacs-cribbed global entry points (RED — requirement not yet built)
+;;
+;; The operator's intent is that beemacs crib cavemacs's interface directly:
+;; a single global `beemacs' command that drops the operator straight into an
+;; agent prompt at the repo root (no session-name round-trip, exactly as
+;; starting a session at the repo root does in cavemacs), and a global
+;; `beemacs-sessions' command that browses and resumes/restarts past sessions.
+;; Today neither symbol exists as a command -- the only entry points are
+;; `beemacs-pi-chat-open' (prompts for a session NAME first, then a manual
+;; send) and `beemacs-pi-sessions-open' (a pi session-tree browser under a
+;; different name).  These tests assert the real commands via `commandp'
+;; (genuine command existence, not a source grep) and are intentionally
+;; failing until the interface is cribbed.
+
+(ert-deftest beemacs-test-global-command-exists ()
+  "`beemacs' is an interactive command (the global entry point)."
+  (should (commandp 'beemacs)))
+
+(ert-deftest beemacs-test-global-command-starts-immediately ()
+  "`beemacs' takes no mandatory argument, so it starts a prompt immediately.
+Unlike `beemacs-pi-chat-open', which requires a session NAME up front, the
+global `beemacs' command must be invocable with no required arguments so it
+drops straight into a prompt at the repo root."
+  (should (commandp 'beemacs))
+  (should (equal (help-function-arglist 'beemacs t) '())))
+
+(ert-deftest beemacs-test-sessions-command-exists ()
+  "`beemacs-sessions' is an interactive command (the session browser)."
+  (should (commandp 'beemacs-sessions)))
+
 (provide 'beemacs-tests)
 
 ;;; beemacs-tests.el ends here

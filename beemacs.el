@@ -620,7 +620,12 @@ when NAME is nil.
 Never displays a secret value -- only the key-name listing the backend
 itself ever returns -- but supports setting a new value for a key via
 `beemacs-secrets-view-set-key' (bound to \"s\"), mirroring the web UI's
-secrets panel form."
+secrets panel form.
+
+Called interactively (e.g. from `beemacs-menu') NAME is nil, opening the
+hive-wide global secrets scope; per-submodule scopes are reached via
+`beemacs-submodule-view-secrets'."
+  (interactive)
   (let ((buf (get-buffer-create (format "*beemacs-secrets: %s*" (or name "(global)")))))
     (with-current-buffer buf
       (beemacs-secrets-view-mode)
